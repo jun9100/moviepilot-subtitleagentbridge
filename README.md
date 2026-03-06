@@ -36,10 +36,15 @@
 - `include_paths`：仅扫描刮削后目录（例如 `/media/tv,/media/movies`）
 - `exclude_paths`：明确排除未整理目录（例如 `/media/downloads,/media/整理前,/media/刷流`）
 - `exclude_keywords`：建议保留默认
+- `title_aliases`：标题别名映射（中日/中英名不一致时推荐）
 
 默认关键词已包含：
 
 `整理前,刷流,strm,stream,downloads,download,incoming,temp,cache`
+
+别名示例：
+
+`短剧开始啦=コントが始まる; 黄石：法警小队=Marshals`
 
 ## 插件 API
 
@@ -73,6 +78,7 @@ curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/backfil
   --data-urlencode "include_paths=/media/tv,/media/movies" \
   --data-urlencode "exclude_paths=/media/downloads,/media/整理前,/media/刷流" \
   --data-urlencode "exclude_keywords=整理前,刷流,strm,stream,downloads,download,incoming,temp,cache" \
+  --data-urlencode "title_aliases=短剧开始啦=コントが始まる" \
   --data-urlencode "recursive=true" \
   --data-urlencode "media_type=tv" \
   --data-urlencode "languages=zh-cn,zh-tw" \
@@ -82,6 +88,7 @@ curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/backfil
 
 ## 版本说明（近期）
 
+- `v0.5.1`：新增标题别名映射（`title_aliases`）与泛化标题过滤，降低剧集误匹配字幕风险。
 - `v0.5.0`：新增仅扫描目录白名单（`include_paths`）与默认 `downloads` 排除，避免字幕写入未整理目录。
 - `v0.4.0`：支持排除目录和关键词。
 - `v0.3.x`：支持目录回填、关键词过滤和标题回退搜索。
