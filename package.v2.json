@@ -3,12 +3,13 @@
     "name": "Subtitle Agent Bridge",
     "description": "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。",
     "labels": "字幕,MoviePilot,自动化",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "icon": "Moviepilot_A.png",
     "author": "jun9100",
     "level": 1,
     "release": false,
     "history": {
+      "v0.2.1": "修复搜索请求调用方式（RequestUtils.post_res），解决“搜索接口无响应”问题",
       "v0.2.0": "完善错误处理、中文默认语言与手动触发能力",
       "v0.1.0": "初始版本"
     }

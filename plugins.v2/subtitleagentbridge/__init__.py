@@ -21,7 +21,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.2.0"
+    plugin_version = "0.2.1"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -442,7 +442,8 @@ class SubtitleAgentBridge(_PluginBase):
         search_url = self.__compose_url(self._search_path)
 
         try:
-            res = RequestUtils(timeout=self._timeout).post(search_url, json=payload)
+            # MoviePilot RequestUtils.post_res returns the response object; post may return empty payload.
+            res = RequestUtils(timeout=self._timeout).post_res(search_url, json=payload)
         except Exception as err:
             return [], f"请求搜索接口失败: {str(err)}"
 
