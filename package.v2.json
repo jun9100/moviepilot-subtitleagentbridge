@@ -7,7 +7,6 @@
     "icon": "Moviepilot_A.png",
     "author": "jun9100",
     "level": 1,
-    "release": true,
     "history": {
       "v0.2.0": "完善错误处理、中文默认语言与手动触发能力",
       "v0.1.0": "初始版本"
