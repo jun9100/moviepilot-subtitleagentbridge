@@ -1,7 +1,9 @@
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
+from urllib.request import Request, urlopen
 
 from app import schemas
 from app.core.config import settings
@@ -10,7 +12,6 @@ from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType
 from app.schemas.types import EventType, MediaType
-from app.utils.http import RequestUtils
 
 
 class SubtitleAgentBridge(_PluginBase):
@@ -21,7 +22,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.2.1"
+    plugin_version = "0.2.2"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -440,20 +441,29 @@ class SubtitleAgentBridge(_PluginBase):
 
     def __search_items(self, payload: Dict[str, Any]) -> Tuple[List[dict], Optional[str]]:
         search_url = self.__compose_url(self._search_path)
+        body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = Request(
+            url=search_url,
+            data=body_bytes,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
 
         try:
-            # MoviePilot RequestUtils.post_res returns the response object; post may return empty payload.
-            res = RequestUtils(timeout=self._timeout).post_res(search_url, json=payload)
+            with urlopen(request, timeout=self._timeout) as res:
+                status_code = int(getattr(res, "status", 200))
+                content = res.read()
         except Exception as err:
             return [], f"请求搜索接口失败: {str(err)}"
 
-        if not res:
-            return [], "搜索接口无响应"
-        if res.status_code != 200:
-            return [], f"搜索接口返回错误: {res.status_code}"
+        if status_code != 200:
+            return [], f"搜索接口返回错误: {status_code}"
 
         try:
-            body = res.json()
+            body = json.loads(content.decode("utf-8", errors="ignore"))
         except Exception as err:
             return [], f"解析搜索结果失败: {str(err)}"
 
@@ -483,23 +493,29 @@ class SubtitleAgentBridge(_PluginBase):
 
         full_url = self.__compose_url(download_url)
         try:
-            res = RequestUtils(timeout=self._timeout).get_res(full_url)
+            request = Request(
+                url=full_url,
+                headers={"Accept": "*/*"},
+                method="GET",
+            )
+            with urlopen(request, timeout=self._timeout) as res:
+                status_code = int(getattr(res, "status", 200))
+                content_type = str(res.headers.get("Content-Type") or "").lower()
+                content = res.read()
         except Exception as err:
             return None, "srt", f"请求下载接口失败: {str(err)}"
 
-        if not res:
-            return None, "srt", "下载接口无响应"
-        if res.status_code != 200:
-            return None, "srt", f"下载接口返回错误: {res.status_code}"
+        if status_code != 200:
+            return None, "srt", f"下载接口返回错误: {status_code}"
 
-        try:
-            body = res.json()
-        except Exception:
-            body = None
-        if isinstance(body, dict) and "success" in body and body.get("success") is not True:
-            return None, "srt", str(body.get("message") or "字幕下载失败")
+        if "application/json" in content_type:
+            try:
+                body = json.loads(content.decode("utf-8", errors="ignore"))
+            except Exception:
+                body = None
+            if isinstance(body, dict) and "success" in body and body.get("success") is not True:
+                return None, "srt", str(body.get("message") or "字幕下载失败")
 
-        content = res.content
         if not content:
             return None, "srt", "下载内容为空"
 
