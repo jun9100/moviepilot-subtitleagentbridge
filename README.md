@@ -48,5 +48,6 @@ curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/backfil
   --data-urlencode "recursive=true" \
   --data-urlencode "media_type=tv" \
   --data-urlencode "languages=zh-cn,zh-tw" \
+  --data-urlencode "name_contains=Marshals" \
   --data-urlencode "max_files=200"
 ```
