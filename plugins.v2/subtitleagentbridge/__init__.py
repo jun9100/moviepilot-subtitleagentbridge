@@ -22,7 +22,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.2.2"
+    plugin_version = "0.2.3"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -34,7 +34,7 @@ class SubtitleAgentBridge(_PluginBase):
     _search_path: str = "/api/v1/moviepilot/subtitles/search"
     _languages: str = "zh-cn,zh-tw"
     _limit: int = 5
-    _timeout: int = 20
+    _timeout: int = 60
     _overwrite: bool = False
     _notify: bool = True
 
@@ -47,7 +47,8 @@ class SubtitleAgentBridge(_PluginBase):
         self._search_path = str(config.get("search_path") or "/api/v1/moviepilot/subtitles/search")
         self._languages = str(config.get("languages") or "zh-cn,zh-tw")
         self._limit = int(config.get("limit") or 5)
-        self._timeout = int(config.get("timeout") or 20)
+        # Some providers may respond slowly in NAS environments; keep a safe minimum timeout.
+        self._timeout = max(int(config.get("timeout") or 60), 60)
         self._overwrite = bool(config.get("overwrite"))
         self._notify = bool(config.get("notify", True))
 
@@ -219,7 +220,7 @@ class SubtitleAgentBridge(_PluginBase):
             "search_path": "/api/v1/moviepilot/subtitles/search",
             "languages": "zh-cn,zh-tw",
             "limit": 5,
-            "timeout": 20,
+            "timeout": 60,
             "overwrite": False,
             "notify": True,
         }
