@@ -44,12 +44,13 @@ Example:
 ```bash
 curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/backfill_directory" \
   --data-urlencode "apikey=<API_TOKEN>" \
-  --data-urlencode "directory=/media/tv/Marshals" \
+  --data-urlencode "directory=/media" \
   --data-urlencode "recursive=true" \
   --data-urlencode "media_type=tv" \
   --data-urlencode "languages=zh-cn,zh-tw" \
   --data-urlencode "name_contains=Marshals" \
-  --data-urlencode "exclude_keywords=整理前,刷流,strm,stream" \
-  --data-urlencode "exclude_paths=/media/整理前,/media/刷流" \
+  --data-urlencode "include_paths=/media/library/tv,/media/library/movie" \
+  --data-urlencode "exclude_keywords=整理前,刷流,strm,stream,downloads,download,incoming,temp,cache" \
+  --data-urlencode "exclude_paths=/media/downloads,/media/整理前,/media/刷流" \
   --data-urlencode "max_files=200"
 ```
