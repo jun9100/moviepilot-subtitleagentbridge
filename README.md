@@ -18,7 +18,7 @@ MoviePilot plugin for integrating an external Subtitle Agent service.
 - `search_path`: `/api/v1/moviepilot/subtitles/search`
 - `languages`: `zh-cn,zh-tw`
 - `limit`: `5`
-- `timeout`: `20`
+- `timeout`: `60`
 
 ## Install in MoviePilot
 
@@ -29,7 +29,24 @@ MoviePilot plugin for integrating an external Subtitle Agent service.
 ## Manual API Trigger (plugin endpoint)
 
 - `/api/v1/plugin/SubtitleAgentBridge/download_subtitle`
+- `/api/v1/plugin/SubtitleAgentBridge/backfill_directory`
 
 Required param:
 
 - `apikey` (MoviePilot API token)
+
+### Backfill existing library subtitles
+
+Use `backfill_directory` to scan an existing media folder and download subtitles for files that do not already have subtitle files.
+
+Example:
+
+```bash
+curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/backfill_directory" \
+  --data-urlencode "apikey=<API_TOKEN>" \
+  --data-urlencode "directory=/media/tv/Marshals" \
+  --data-urlencode "recursive=true" \
+  --data-urlencode "media_type=tv" \
+  --data-urlencode "languages=zh-cn,zh-tw" \
+  --data-urlencode "max_files=200"
+```
