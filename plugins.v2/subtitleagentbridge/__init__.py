@@ -23,7 +23,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.1"
+    plugin_version = "0.5.2"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -42,6 +42,8 @@ class SubtitleAgentBridge(_PluginBase):
     _exclude_paths: str = ""
     _exclude_keywords: str = "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache"
     _title_aliases: str = ""
+    _auto_timing_sync: bool = True
+    _auto_timing_max_offset_seconds: int = 120
 
     _subtitle_suffixes = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
     _season_episode_pattern = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})")
@@ -66,6 +68,9 @@ class SubtitleAgentBridge(_PluginBase):
             config.get("exclude_keywords") or "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache"
         )
         self._title_aliases = str(config.get("title_aliases") or "")
+        self._auto_timing_sync = self.__to_bool(config.get("auto_timing_sync"), default=True)
+        max_offset = self.__to_int(config.get("auto_timing_max_offset_seconds"))
+        self._auto_timing_max_offset_seconds = max(10, min(max_offset or 120, 600))
 
     def get_state(self) -> bool:
         return self._enabled
@@ -130,6 +135,35 @@ class SubtitleAgentBridge(_PluginBase):
                                     {
                                         "component": "VSwitch",
                                         "props": {"model": "notify", "label": "发送结果通知"},
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {"model": "auto_timing_sync", "label": "自动校正字幕时间轴"},
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "auto_timing_max_offset_seconds",
+                                            "label": "自动校时最大偏移(秒)",
+                                            "type": "number",
+                                        },
                                     }
                                 ],
                             },
@@ -320,6 +354,8 @@ class SubtitleAgentBridge(_PluginBase):
             "exclude_paths": "",
             "exclude_keywords": "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache",
             "title_aliases": "",
+            "auto_timing_sync": True,
+            "auto_timing_max_offset_seconds": 120,
         }
 
     def get_page(self) -> List[dict]:
@@ -489,21 +525,33 @@ class SubtitleAgentBridge(_PluginBase):
             )
 
         subtitle_path = self.__build_subtitle_path(target_file, subtitle_format)
+        sync_note = ""
         try:
             subtitle_file = Path(subtitle_path)
             subtitle_file.parent.mkdir(parents=True, exist_ok=True)
+            content, sync_note = self.__maybe_auto_sync_timing(
+                content=content,
+                subtitle_format=subtitle_format,
+                media_file=Path(target_file),
+                subtitle_file=subtitle_file,
+            )
             subtitle_file.write_bytes(content)
         except Exception as err:
             return schemas.Response(success=False, message=f"写入字幕失败: {str(err)}")
 
+        message = f"字幕下载完成: {subtitle_path}"
+        if sync_note:
+            message = f"{message}（{sync_note}）"
+
         return schemas.Response(
             success=True,
-            message=f"字幕下载完成: {subtitle_path}",
+            message=message,
             data={
                 "path": subtitle_path,
                 "provider": selected.get("provider"),
                 "subtitle_id": selected.get("subtitle_id"),
                 "size": len(content),
+                "sync": sync_note,
             },
         )
 
@@ -652,6 +700,12 @@ class SubtitleAgentBridge(_PluginBase):
 
                     try:
                         subtitle_path.parent.mkdir(parents=True, exist_ok=True)
+                        content, sync_note = self.__maybe_auto_sync_timing(
+                            content=content,
+                            subtitle_format=subtitle_format,
+                            media_file=video_file,
+                            subtitle_file=subtitle_path,
+                        )
                         subtitle_path.write_bytes(content)
                     except Exception as err:
                         failed += 1
@@ -666,9 +720,13 @@ class SubtitleAgentBridge(_PluginBase):
                             "title": selected_title,
                             "provider": selected.get("provider"),
                             "language": selected.get("language"),
+                            "sync": sync_note,
                         }
                     )
-                    logger.info(f"[SubtitleAgentBridge] 批量补字幕成功: {subtitle_path}")
+                    if sync_note:
+                        logger.info(f"[SubtitleAgentBridge] 批量补字幕成功: {subtitle_path} ({sync_note})")
+                    else:
+                        logger.info(f"[SubtitleAgentBridge] 批量补字幕成功: {subtitle_path}")
 
                 if matched > max_file_count:
                     break
@@ -746,9 +804,19 @@ class SubtitleAgentBridge(_PluginBase):
             return False, "字幕已存在且未启用覆盖"
 
         try:
+            content, sync_note = self.__maybe_auto_sync_timing(
+                content=content,
+                subtitle_format=subtitle_format,
+                media_file=Path(media_file),
+                subtitle_file=subtitle_file,
+            )
             subtitle_file.write_bytes(content)
         except Exception as err:
             return False, f"写入字幕失败: {str(err)}"
+
+        if sync_note:
+            logger.info(f"[SubtitleAgentBridge] 字幕下载完成: {subtitle_file} ({sync_note})")
+            return True, f"{subtitle_path} ({sync_note})"
 
         logger.info(f"[SubtitleAgentBridge] 字幕下载完成: {subtitle_file}")
         return True, subtitle_path
@@ -861,6 +929,323 @@ class SubtitleAgentBridge(_PluginBase):
 
         subtitle_format = str(item.get("format") or item.get("subtitle_format") or "srt").lower()
         return content, subtitle_format, None
+
+    def __maybe_auto_sync_timing(
+        self,
+        *,
+        content: bytes,
+        subtitle_format: str,
+        media_file: Path,
+        subtitle_file: Path,
+    ) -> Tuple[bytes, str]:
+        if not self._auto_timing_sync:
+            return content, ""
+
+        fmt = str(subtitle_format or "").strip().lower()
+        if fmt not in {"srt", "ass", "ssa", "vtt"}:
+            return content, ""
+        if not media_file.exists() or not media_file.is_file():
+            return content, ""
+
+        source_text = self.__decode_subtitle_text(content)
+        if not source_text:
+            return content, ""
+
+        source_times = self.__extract_cue_times(source_text, fmt)
+        if len(source_times) < 8:
+            return content, ""
+
+        refs = self.__collect_reference_subtitles(media_file, subtitle_file)
+        if not refs:
+            return content, ""
+
+        max_offset_ms = max(10, self._auto_timing_max_offset_seconds) * 1000
+        best_offset_ms: Optional[int] = None
+        best_score = 0
+        best_ref_name = ""
+
+        for ref_path in refs:
+            ref_fmt = ref_path.suffix.lower().lstrip(".")
+            if ref_fmt not in {"srt", "ass", "ssa", "vtt"}:
+                continue
+            try:
+                ref_content = ref_path.read_bytes()
+            except Exception:
+                continue
+            ref_text = self.__decode_subtitle_text(ref_content)
+            if not ref_text:
+                continue
+            ref_times = self.__extract_cue_times(ref_text, ref_fmt)
+            if len(ref_times) < 8:
+                continue
+
+            estimated = self.__estimate_offset_ms(source_times, ref_times, max_offset_ms=max_offset_ms)
+            if not estimated:
+                continue
+
+            offset_ms, score = estimated
+            if score > best_score:
+                best_score = score
+                best_offset_ms = offset_ms
+                best_ref_name = ref_path.name
+
+        if best_offset_ms is None or abs(best_offset_ms) < 500:
+            return content, ""
+
+        shifted_text = self.__shift_subtitle_text(source_text, fmt, best_offset_ms)
+        if not shifted_text or shifted_text == source_text:
+            return content, ""
+
+        note = f"自动校时 {best_offset_ms / 1000:+.1f}s, 参考 {best_ref_name}, 匹配 {best_score}"
+        return shifted_text.encode("utf-8"), note
+
+    def __collect_reference_subtitles(self, media_file: Path, subtitle_file: Path) -> List[Path]:
+        refs: List[Path] = []
+        prefix = media_file.stem
+        for candidate in media_file.parent.iterdir():
+            if not candidate.is_file():
+                continue
+            if candidate.suffix.lower() not in self._subtitle_suffixes:
+                continue
+            if candidate.stem != prefix and not candidate.stem.startswith(f"{prefix}."):
+                continue
+            if self.__normalize_path(str(candidate)) == self.__normalize_path(str(subtitle_file)):
+                continue
+            refs.append(candidate)
+
+        def sort_key(path: Path) -> Tuple[int, int]:
+            name = path.name.lower()
+            prefer_en = 0 if any(tag in name for tag in [".en.", ".eng.", "english", "英文"]) else 1
+            try:
+                size = -int(path.stat().st_size)
+            except Exception:
+                size = 0
+            return prefer_en, size
+
+        refs.sort(key=sort_key)
+        return refs[:8]
+
+    @staticmethod
+    def __decode_subtitle_text(content: bytes) -> str:
+        encodings = ("utf-8-sig", "utf-16", "utf-16le", "utf-16be", "gb18030", "cp936", "big5", "cp950")
+        for encoding in encodings:
+            try:
+                return content.decode(encoding)
+            except Exception:
+                continue
+        return content.decode("utf-8", errors="ignore")
+
+    def __extract_cue_times(self, text: str, subtitle_format: str) -> List[int]:
+        fmt = str(subtitle_format or "").strip().lower()
+        if fmt == "srt":
+            pattern = re.compile(
+                r"(?m)(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})"
+            )
+            values = [self.__parse_srt_time(match.group(1)) for match in pattern.finditer(text)]
+        elif fmt in {"ass", "ssa"}:
+            pattern = re.compile(r"(?m)^(?:Dialogue|Comment):\s*\d+,(\d+:\d{2}:\d{2}\.\d{2}),")
+            values = [self.__parse_ass_time_ms(match.group(1)) for match in pattern.finditer(text)]
+        elif fmt == "vtt":
+            pattern = re.compile(
+                r"(?m)(\d{2}:\d{2}:\d{2}\.\d{3}|\d{2}:\d{2}\.\d{3})\s*-->\s*"
+                r"(\d{2}:\d{2}:\d{2}\.\d{3}|\d{2}:\d{2}\.\d{3})"
+            )
+            values = [self.__parse_vtt_time(match.group(1)) for match in pattern.finditer(text)]
+        else:
+            values = []
+
+        cleaned = sorted(value for value in values if value >= 0)
+        return cleaned[:600]
+
+    @staticmethod
+    def __estimate_offset_ms(
+        source_times: List[int],
+        ref_times: List[int],
+        *,
+        max_offset_ms: int,
+    ) -> Optional[Tuple[int, int]]:
+        if not source_times or not ref_times:
+            return None
+
+        bin_ms = 500
+        max_shift = int(max_offset_ms // bin_ms)
+        src_bins: Dict[int, int] = {}
+        ref_bins: Dict[int, int] = {}
+
+        for value in source_times[:600]:
+            key = int(round(value / bin_ms))
+            src_bins[key] = src_bins.get(key, 0) + 1
+        for value in ref_times[:600]:
+            key = int(round(value / bin_ms))
+            ref_bins[key] = ref_bins.get(key, 0) + 1
+
+        if not src_bins or not ref_bins:
+            return None
+
+        def score_for(shift: int) -> int:
+            score = 0
+            for key, count in src_bins.items():
+                ref_count = ref_bins.get(key + shift, 0)
+                if ref_count > 0:
+                    score += min(count, ref_count)
+            return score
+
+        zero_score = score_for(0)
+        best_shift = 0
+        best_score = zero_score
+
+        for shift in range(-max_shift, max_shift + 1):
+            if shift == 0:
+                continue
+            current = score_for(shift)
+            if current > best_score:
+                best_score = current
+                best_shift = shift
+
+        min_required = max(6, min(sum(src_bins.values()), sum(ref_bins.values())) // 12)
+        if best_shift == 0 or best_score < min_required:
+            return None
+        if best_score <= zero_score + 2:
+            return None
+        return best_shift * bin_ms, best_score
+
+    def __shift_subtitle_text(self, text: str, subtitle_format: str, offset_ms: int) -> str:
+        fmt = str(subtitle_format or "").strip().lower()
+        if fmt == "srt":
+            return self.__shift_srt_text(text, offset_ms)
+        if fmt in {"ass", "ssa"}:
+            return self.__shift_ass_text(text, offset_ms)
+        if fmt == "vtt":
+            return self.__shift_vtt_text(text, offset_ms)
+        return text
+
+    def __shift_srt_text(self, text: str, offset_ms: int) -> str:
+        pattern = re.compile(
+            r"(?m)(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})"
+        )
+
+        def repl(match: re.Match) -> str:
+            start_ms = self.__parse_srt_time(match.group(1))
+            end_ms = self.__parse_srt_time(match.group(2))
+            shifted_start = max(0, start_ms + offset_ms)
+            shifted_end = max(shifted_start, end_ms + offset_ms)
+            return f"{self.__format_srt_time(shifted_start)} --> {self.__format_srt_time(shifted_end)}"
+
+        return pattern.sub(repl, text)
+
+    def __shift_ass_text(self, text: str, offset_ms: int) -> str:
+        pattern = re.compile(
+            r"(?m)^(?P<prefix>(?:Dialogue|Comment):\s*\d+,)"
+            r"(?P<start>\d+:\d{2}:\d{2}\.\d{2}),"
+            r"(?P<end>\d+:\d{2}:\d{2}\.\d{2})"
+            r"(?P<suffix>,.*)$"
+        )
+
+        def repl(match: re.Match) -> str:
+            start_ms = self.__parse_ass_time_ms(match.group("start"))
+            end_ms = self.__parse_ass_time_ms(match.group("end"))
+            shifted_start = max(0, start_ms + offset_ms)
+            shifted_end = max(shifted_start, end_ms + offset_ms)
+            return (
+                f"{match.group('prefix')}"
+                f"{self.__format_ass_time_ms(shifted_start)},"
+                f"{self.__format_ass_time_ms(shifted_end)}"
+                f"{match.group('suffix')}"
+            )
+
+        return pattern.sub(repl, text)
+
+    def __shift_vtt_text(self, text: str, offset_ms: int) -> str:
+        pattern = re.compile(
+            r"(?m)(\d{2}:\d{2}:\d{2}\.\d{3}|\d{2}:\d{2}\.\d{3})\s*-->\s*"
+            r"(\d{2}:\d{2}:\d{2}\.\d{3}|\d{2}:\d{2}\.\d{3})"
+        )
+
+        def repl(match: re.Match) -> str:
+            start_ms = self.__parse_vtt_time(match.group(1))
+            end_ms = self.__parse_vtt_time(match.group(2))
+            shifted_start = max(0, start_ms + offset_ms)
+            shifted_end = max(shifted_start, end_ms + offset_ms)
+            return f"{self.__format_vtt_time(shifted_start)} --> {self.__format_vtt_time(shifted_end)}"
+
+        return pattern.sub(repl, text)
+
+    @staticmethod
+    def __parse_srt_time(value: str) -> int:
+        match = re.match(r"^(\d{2}):(\d{2}):(\d{2})[,.](\d{3})$", str(value).strip())
+        if not match:
+            return 0
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        second = int(match.group(3))
+        millisecond = int(match.group(4))
+        return ((hour * 3600 + minute * 60 + second) * 1000) + millisecond
+
+    @staticmethod
+    def __format_srt_time(value_ms: int) -> str:
+        total = max(0, int(value_ms))
+        hour, remain = divmod(total, 3_600_000)
+        minute, remain = divmod(remain, 60_000)
+        second, millisecond = divmod(remain, 1000)
+        return f"{hour:02d}:{minute:02d}:{second:02d},{millisecond:03d}"
+
+    @staticmethod
+    def __parse_ass_time_ms(value: str) -> int:
+        match = re.match(r"^(\d+):(\d{2}):(\d{2})\.(\d{2})$", str(value).strip())
+        if not match:
+            return 0
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        second = int(match.group(3))
+        centisecond = int(match.group(4))
+        return ((hour * 3600 + minute * 60 + second) * 1000) + centisecond * 10
+
+    @staticmethod
+    def __format_ass_time_ms(value_ms: int) -> str:
+        total = max(0, int(value_ms))
+        hour, remain = divmod(total, 3_600_000)
+        minute, remain = divmod(remain, 60_000)
+        second, millisecond = divmod(remain, 1000)
+        centisecond = int(round(millisecond / 10.0))
+        if centisecond >= 100:
+            second += 1
+            centisecond = 0
+            if second >= 60:
+                minute += 1
+                second = 0
+                if minute >= 60:
+                    hour += 1
+                    minute = 0
+        return f"{hour}:{minute:02d}:{second:02d}.{centisecond:02d}"
+
+    @staticmethod
+    def __parse_vtt_time(value: str) -> int:
+        text = str(value).strip()
+        parts = text.split(":")
+        if len(parts) == 2:
+            hour = 0
+            minute = int(parts[0])
+            second_part = parts[1]
+        elif len(parts) == 3:
+            hour = int(parts[0])
+            minute = int(parts[1])
+            second_part = parts[2]
+        else:
+            return 0
+        sec_parts = second_part.split(".")
+        if len(sec_parts) != 2:
+            return 0
+        second = int(sec_parts[0])
+        millisecond = int(sec_parts[1].ljust(3, "0")[:3])
+        return ((hour * 3600 + minute * 60 + second) * 1000) + millisecond
+
+    @staticmethod
+    def __format_vtt_time(value_ms: int) -> str:
+        total = max(0, int(value_ms))
+        hour, remain = divmod(total, 3_600_000)
+        minute, remain = divmod(remain, 60_000)
+        second, millisecond = divmod(remain, 1000)
+        return f"{hour:02d}:{minute:02d}:{second:02d}.{millisecond:03d}"
 
     @staticmethod
     def __is_video_file(path: str) -> bool:

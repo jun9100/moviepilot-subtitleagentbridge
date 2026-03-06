@@ -28,6 +28,16 @@
 - `languages`: `zh-cn,zh-tw`
 - `limit`: `5`
 - `timeout`: `60` 或更高
+- `auto_timing_sync`: `true`（建议开启）
+- `auto_timing_max_offset_seconds`: `120`
+
+### 自动时间轴校正
+
+插件会在写入字幕前自动尝试校时：
+
+- 仅在目标视频同目录存在“同名参考字幕”时触发（如 `xxx.en.srt`、`xxx.ass`）。
+- 自动估算最优整体偏移并平移时间轴。
+- 没有足够置信度时不会改动原字幕（避免误修正）。
 
 ### 回填目录策略（重点）
 
@@ -88,6 +98,7 @@ curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/backfil
 
 ## 版本说明（近期）
 
+- `v0.5.2`：新增自动字幕时间轴校正（参考同目录已有字幕，自动判断并平移）。
 - `v0.5.1`：新增标题别名映射（`title_aliases`）与泛化标题过滤，降低剧集误匹配字幕风险。
 - `v0.5.0`：新增仅扫描目录白名单（`include_paths`）与默认 `downloads` 排除，避免字幕写入未整理目录。
 - `v0.4.0`：支持排除目录和关键词。
