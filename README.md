@@ -98,6 +98,7 @@ curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/backfil
 
 ## 版本说明（近期）
 
+- `v0.5.3`：适配 Subtitle Agent `v0.1.5` 多源分层检索（`assrt/subhd -> podnapisi/tvsubtitles -> opensubtitles`）。
 - `v0.5.2`：新增自动字幕时间轴校正（参考同目录已有字幕，自动判断并平移）。
 - `v0.5.1`：新增标题别名映射（`title_aliases`）与泛化标题过滤，降低剧集误匹配字幕风险。
 - `v0.5.0`：新增仅扫描目录白名单（`include_paths`）与默认 `downloads` 排除，避免字幕写入未整理目录。
