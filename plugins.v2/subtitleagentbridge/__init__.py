@@ -25,7 +25,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.13"
+    plugin_version = "0.5.14"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -1693,6 +1693,7 @@ class SubtitleAgentBridge(_PluginBase):
             ("ffprobe", self.__probe_with_ffprobe),
             ("mediainfo", self.__probe_with_mediainfo),
             ("ffmpeg", self.__probe_with_ffmpeg),
+            ("signature", self.__probe_with_signature),
         ]
 
         for backend_name, backend in backends:
@@ -1713,7 +1714,7 @@ class SubtitleAgentBridge(_PluginBase):
             result["has_chinese_audio"] = bool(result["has_chinese_audio"] or partial.get("has_chinese_audio"))
             if not result["probe_backend"] and (result["has_embedded_subtitle"] or result["has_chinese_audio"]):
                 result["probe_backend"] = backend_name
-            if result["has_embedded_subtitle"] and result["has_chinese_audio"]:
+            if result["has_embedded_subtitle"] or result["has_chinese_audio"]:
                 break
 
         if not result["probe_backend"] and probe_errors:
@@ -1832,6 +1833,43 @@ class SubtitleAgentBridge(_PluginBase):
             if result["has_embedded_subtitle"] and result["has_chinese_audio"]:
                 break
         return result
+
+    def __probe_with_signature(self, media_file: Path) -> Optional[Dict[str, bool]]:
+        try:
+            size = media_file.stat().st_size
+            if size <= 0:
+                return None
+            chunk_size = min(4 * 1024 * 1024, size)
+            with media_file.open("rb") as handle:
+                head = handle.read(chunk_size)
+                tail = b""
+                if size > chunk_size * 2:
+                    handle.seek(max(0, size - chunk_size))
+                    tail = handle.read(chunk_size)
+            payload = (head + tail).lower()
+            if not payload:
+                return None
+        except Exception:
+            return None
+
+        subtitle_markers = (
+            b"tx3g",  # MP4 mov_text
+            b"wvtt",  # WebVTT in MP4
+            b"stpp",  # TTML in MP4
+            b"subrip",
+            b"s_text/",
+            b"s_ssa",
+            b"s_ass",
+            b"s_hdmv/pgs",
+            b"dvb_subtitle",
+            b"hdmv pgs",
+            b"vobsub",
+        )
+        has_subtitle = any(marker in payload for marker in subtitle_markers)
+        if not has_subtitle:
+            return None
+
+        return {"has_embedded_subtitle": True, "has_chinese_audio": False}
 
     def __is_chinese_audio_stream(self, language: str, title: str) -> bool:
         lang = str(language or "").strip().lower().replace("_", "-")
