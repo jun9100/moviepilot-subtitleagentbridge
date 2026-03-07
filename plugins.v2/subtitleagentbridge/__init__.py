@@ -1,5 +1,6 @@
 import json
 import re
+import subprocess
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -24,7 +25,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.11"
+    plugin_version = "0.5.12"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -55,8 +56,24 @@ class SubtitleAgentBridge(_PluginBase):
     _periodic_thread: Optional[threading.Thread] = None
     _periodic_stop_event: Optional[threading.Event] = None
     _periodic_run_lock = threading.Lock()
+    _media_probe_cache: Dict[str, Dict[str, Any]] = {}
 
     _subtitle_suffixes = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
+    _chinese_audio_lang_aliases = {
+        "zh",
+        "zho",
+        "chi",
+        "chs",
+        "cht",
+        "cmn",
+        "yue",
+        "zh-cn",
+        "zh-tw",
+        "zh-hans",
+        "zh-hant",
+    }
+    _chinese_audio_title_markers = {"中文", "国语", "普通话", "mandarin", "chinese", "cantonese", "粤语"}
+    _chinese_library_markers = {"/国产剧/", "/华语电影/", "/国语/", "/大陆剧/", "/中国/"}
     _season_episode_pattern = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})")
     _year_pattern = re.compile(r"\b(19\d{2}|20\d{2})\b")
 
@@ -92,6 +109,7 @@ class SubtitleAgentBridge(_PluginBase):
         self._periodic_max_files = max(1, min(periodic_max_files or 200, 2000))
         self._periodic_recursive = self.__to_bool(config.get("periodic_recursive"), default=True)
         self._manual_notice_cache = set()
+        self._media_probe_cache = {}
         self.__start_periodic_worker()
 
     def get_state(self) -> bool:
@@ -659,6 +677,7 @@ class SubtitleAgentBridge(_PluginBase):
 
         total = 0
         success = 0
+        skipped = 0
         errors = []
         include_paths = self.__merge_csv_values(self._include_paths)
         excluded_paths = self.__merge_csv_values(self._exclude_paths)
@@ -673,6 +692,15 @@ class SubtitleAgentBridge(_PluginBase):
                 continue
             if self.__is_excluded_path(media_path, excluded_paths, excluded_keywords):
                 logger.info(f"[SubtitleAgentBridge] 跳过排除目录文件: {media_file}")
+                continue
+            parsed_context = self.__parse_media_context_from_file(
+                media_path,
+                forced_media_type="series" if getattr(mediainfo, "type", None) == MediaType.TV else "movie",
+            )
+            skip_reason = self.__skip_reason_for_media(media_path, parsed_context)
+            if skip_reason:
+                skipped += 1
+                logger.info(f"[SubtitleAgentBridge] 跳过无需补字幕文件: {media_file} ({skip_reason})")
                 continue
             total += 1
             state, message = self.__download_for_media_file(
@@ -693,13 +721,14 @@ class SubtitleAgentBridge(_PluginBase):
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "total": total,
             "success": success,
+            "skipped": skipped,
             "failed": failed,
             "errors": errors,
         }
         self.save_data("last_result", result)
 
         if self._notify:
-            text = f"处理 {total} 个视频，成功 {success} 个，失败 {failed} 个"
+            text = f"处理 {total} 个视频，成功 {success} 个，跳过 {skipped} 个，失败 {failed} 个"
             if errors:
                 text = f"{text}\n" + "\n".join(errors[:5])
             self.post_message(
@@ -902,6 +931,10 @@ class SubtitleAgentBridge(_PluginBase):
                         continue
 
                     parsed = self.__parse_media_context_from_file(video_file, forced_media_type=desired_type)
+                    skip_reason = self.__skip_reason_for_media(video_file, parsed)
+                    if skip_reason:
+                        skipped += 1
+                        continue
                     if dry_run_flag:
                         missing_files.append(
                             {
@@ -1598,6 +1631,91 @@ class SubtitleAgentBridge(_PluginBase):
             if name == f"{prefix}{suffix}" or name.startswith(subtitle_prefix):
                 return True
         return False
+
+    def __skip_reason_for_media(self, media_file: Path, parsed: Optional[Dict[str, Any]] = None) -> str:
+        normalized_path = self.__normalize_path(str(media_file))
+        if any(marker in normalized_path for marker in self._chinese_library_markers):
+            return "中文内容库（国产/华语目录）"
+
+        probe = self.__probe_media_streams(media_file)
+        if probe.get("has_embedded_subtitle"):
+            return "媒体已内封字幕"
+        if probe.get("has_chinese_audio"):
+            return "媒体含中文音轨"
+        return ""
+
+    def __probe_media_streams(self, media_file: Path) -> Dict[str, Any]:
+        cache_key = self.__media_probe_cache_key(media_file)
+        if cache_key and cache_key in self._media_probe_cache:
+            return self._media_probe_cache[cache_key]
+
+        result: Dict[str, Any] = {
+            "has_embedded_subtitle": False,
+            "has_chinese_audio": False,
+        }
+
+        cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_streams",
+            str(media_file),
+        ]
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+            if proc.returncode != 0:
+                if cache_key:
+                    self._media_probe_cache[cache_key] = result
+                return result
+            payload = json.loads(proc.stdout or "{}")
+        except Exception:
+            if cache_key:
+                self._media_probe_cache[cache_key] = result
+            return result
+
+        streams = payload.get("streams") if isinstance(payload, dict) else []
+        if not isinstance(streams, list):
+            streams = []
+
+        for stream in streams:
+            if not isinstance(stream, dict):
+                continue
+            codec_type = str(stream.get("codec_type") or "").strip().lower()
+            tags = stream.get("tags") if isinstance(stream.get("tags"), dict) else {}
+            language = str(tags.get("language") or "").strip().lower().replace("_", "-")
+            title = str(tags.get("title") or "").strip().lower()
+
+            if codec_type == "subtitle":
+                result["has_embedded_subtitle"] = True
+
+            if codec_type == "audio":
+                if language in self._chinese_audio_lang_aliases or language.startswith("zh"):
+                    result["has_chinese_audio"] = True
+                elif any(marker in title for marker in self._chinese_audio_title_markers):
+                    result["has_chinese_audio"] = True
+
+            if result["has_embedded_subtitle"] and result["has_chinese_audio"]:
+                break
+
+        if cache_key:
+            self._media_probe_cache[cache_key] = result
+        return result
+
+    @staticmethod
+    def __media_probe_cache_key(media_file: Path) -> str:
+        try:
+            stat = media_file.stat()
+            return f"{media_file}:{stat.st_size}:{stat.st_mtime_ns}"
+        except Exception:
+            return ""
 
     def __build_title_candidates(
         self,
