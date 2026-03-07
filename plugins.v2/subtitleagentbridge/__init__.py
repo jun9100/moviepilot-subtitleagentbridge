@@ -25,7 +25,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.12"
+    plugin_version = "0.5.13"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -73,7 +73,31 @@ class SubtitleAgentBridge(_PluginBase):
         "zh-hant",
     }
     _chinese_audio_title_markers = {"中文", "国语", "普通话", "mandarin", "chinese", "cantonese", "粤语"}
-    _chinese_library_markers = {"/国产剧/", "/华语电影/", "/国语/", "/大陆剧/", "/中国/"}
+    _chinese_library_markers = {
+        "/国产剧/",
+        "/国产电影/",
+        "/华语电影/",
+        "/华语剧/",
+        "/国语/",
+        "/大陆剧/",
+        "/中国/",
+        "/国漫/",
+    }
+    _chinese_library_keywords = {
+        "国产剧",
+        "国产电影",
+        "华语",
+        "国语",
+        "大陆剧",
+        "内地剧",
+        "中国",
+        "国漫",
+        "央视",
+        "cctv",
+        "中配",
+        "国配",
+    }
+    _probe_command_timeout_seconds = 15
     _season_episode_pattern = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})")
     _year_pattern = re.compile(r"\b(19\d{2}|20\d{2})\b")
 
@@ -1634,7 +1658,7 @@ class SubtitleAgentBridge(_PluginBase):
 
     def __skip_reason_for_media(self, media_file: Path, parsed: Optional[Dict[str, Any]] = None) -> str:
         normalized_path = self.__normalize_path(str(media_file))
-        if any(marker in normalized_path for marker in self._chinese_library_markers):
+        if self.__is_chinese_library_path(normalized_path):
             return "中文内容库（国产/华语目录）"
 
         probe = self.__probe_media_streams(media_file)
@@ -1644,6 +1668,15 @@ class SubtitleAgentBridge(_PluginBase):
             return "媒体含中文音轨"
         return ""
 
+    def __is_chinese_library_path(self, normalized_path: str) -> bool:
+        if any(marker in normalized_path for marker in self._chinese_library_markers):
+            return True
+
+        for segment in [item for item in normalized_path.split("/") if item]:
+            if any(keyword in segment for keyword in self._chinese_library_keywords):
+                return True
+        return False
+
     def __probe_media_streams(self, media_file: Path) -> Dict[str, Any]:
         cache_key = self.__media_probe_cache_key(media_file)
         if cache_key and cache_key in self._media_probe_cache:
@@ -1652,62 +1685,162 @@ class SubtitleAgentBridge(_PluginBase):
         result: Dict[str, Any] = {
             "has_embedded_subtitle": False,
             "has_chinese_audio": False,
+            "probe_backend": "",
         }
+        probe_errors: List[str] = []
 
+        backends: List[Tuple[str, Any]] = [
+            ("ffprobe", self.__probe_with_ffprobe),
+            ("mediainfo", self.__probe_with_mediainfo),
+            ("ffmpeg", self.__probe_with_ffmpeg),
+        ]
+
+        for backend_name, backend in backends:
+            try:
+                partial = backend(media_file)
+            except FileNotFoundError:
+                continue
+            except Exception as error:
+                probe_errors.append(f"{backend_name}:{error}")
+                continue
+
+            if not partial:
+                continue
+
+            result["has_embedded_subtitle"] = bool(
+                result["has_embedded_subtitle"] or partial.get("has_embedded_subtitle")
+            )
+            result["has_chinese_audio"] = bool(result["has_chinese_audio"] or partial.get("has_chinese_audio"))
+            if not result["probe_backend"] and (result["has_embedded_subtitle"] or result["has_chinese_audio"]):
+                result["probe_backend"] = backend_name
+            if result["has_embedded_subtitle"] and result["has_chinese_audio"]:
+                break
+
+        if not result["probe_backend"] and probe_errors:
+            logger.debug(
+                "[SubtitleAgentBridge] 媒体流探测失败，已使用默认判定: %s (%s)",
+                media_file,
+                "; ".join(probe_errors[:3]),
+            )
+
+        if cache_key:
+            self._media_probe_cache[cache_key] = result
+        return result
+
+    def __probe_with_ffprobe(self, media_file: Path) -> Optional[Dict[str, bool]]:
         cmd = [
             "ffprobe",
             "-v",
             "error",
             "-print_format",
             "json",
-            "-show_streams",
+            "-show_entries",
+            "stream=codec_type:stream_tags=language,title",
             str(media_file),
         ]
 
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=8,
-            )
-            if proc.returncode != 0:
-                if cache_key:
-                    self._media_probe_cache[cache_key] = result
-                return result
-            payload = json.loads(proc.stdout or "{}")
-        except Exception:
-            if cache_key:
-                self._media_probe_cache[cache_key] = result
-            return result
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=self._probe_command_timeout_seconds,
+        )
+        if proc.returncode != 0:
+            return None
 
+        payload = json.loads(proc.stdout or "{}")
         streams = payload.get("streams") if isinstance(payload, dict) else []
         if not isinstance(streams, list):
             streams = []
 
+        result = {"has_embedded_subtitle": False, "has_chinese_audio": False}
         for stream in streams:
             if not isinstance(stream, dict):
                 continue
             codec_type = str(stream.get("codec_type") or "").strip().lower()
             tags = stream.get("tags") if isinstance(stream.get("tags"), dict) else {}
-            language = str(tags.get("language") or "").strip().lower().replace("_", "-")
-            title = str(tags.get("title") or "").strip().lower()
-
+            language = str(tags.get("language") or "")
+            title = str(tags.get("title") or "")
             if codec_type == "subtitle":
                 result["has_embedded_subtitle"] = True
+            elif codec_type == "audio" and self.__is_chinese_audio_stream(language=language, title=title):
+                result["has_chinese_audio"] = True
+            if result["has_embedded_subtitle"] and result["has_chinese_audio"]:
+                break
+        return result
 
-            if codec_type == "audio":
-                if language in self._chinese_audio_lang_aliases or language.startswith("zh"):
-                    result["has_chinese_audio"] = True
-                elif any(marker in title for marker in self._chinese_audio_title_markers):
-                    result["has_chinese_audio"] = True
+    def __probe_with_mediainfo(self, media_file: Path) -> Optional[Dict[str, bool]]:
+        cmd = ["mediainfo", "--Output=JSON", str(media_file)]
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=self._probe_command_timeout_seconds,
+        )
+        if proc.returncode != 0:
+            return None
+
+        payload = json.loads(proc.stdout or "{}")
+        media = payload.get("media") if isinstance(payload, dict) else {}
+        tracks = media.get("track") if isinstance(media, dict) else []
+        if not isinstance(tracks, list):
+            tracks = []
+
+        result = {"has_embedded_subtitle": False, "has_chinese_audio": False}
+        for track in tracks:
+            if not isinstance(track, dict):
+                continue
+            track_type = str(track.get("@type") or "").strip().lower()
+            language = str(
+                track.get("Language") or track.get("Language/String") or track.get("Language_String3") or ""
+            )
+            title = str(track.get("Title") or track.get("Title_More") or track.get("Title/String") or "")
+
+            if track_type in {"text", "subtitle"}:
+                result["has_embedded_subtitle"] = True
+            elif track_type == "audio" and self.__is_chinese_audio_stream(language=language, title=title):
+                result["has_chinese_audio"] = True
 
             if result["has_embedded_subtitle"] and result["has_chinese_audio"]:
                 break
-
-        if cache_key:
-            self._media_probe_cache[cache_key] = result
         return result
+
+    def __probe_with_ffmpeg(self, media_file: Path) -> Optional[Dict[str, bool]]:
+        cmd = ["ffmpeg", "-hide_banner", "-i", str(media_file)]
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=self._probe_command_timeout_seconds,
+        )
+        output = "\n".join([str(proc.stdout or ""), str(proc.stderr or "")]).strip()
+        if not output:
+            return None
+
+        result = {"has_embedded_subtitle": False, "has_chinese_audio": False}
+        for raw_line in output.splitlines():
+            line = str(raw_line or "").strip().lower()
+            if "stream #" not in line:
+                continue
+            if "subtitle:" in line:
+                result["has_embedded_subtitle"] = True
+            if "audio:" in line:
+                if re.search(r"\((zh|zho|chi|chs|cht|cmn|yue)\)", line):
+                    result["has_chinese_audio"] = True
+                elif self.__is_chinese_audio_stream(language="", title=line):
+                    result["has_chinese_audio"] = True
+            if result["has_embedded_subtitle"] and result["has_chinese_audio"]:
+                break
+        return result
+
+    def __is_chinese_audio_stream(self, language: str, title: str) -> bool:
+        lang = str(language or "").strip().lower().replace("_", "-")
+        if lang in self._chinese_audio_lang_aliases or lang.startswith("zh"):
+            return True
+        title_text = str(title or "").strip().lower()
+        if any(marker in title_text for marker in self._chinese_audio_title_markers):
+            return True
+        return False
 
     @staticmethod
     def __media_probe_cache_key(media_file: Path) -> str:
