@@ -25,7 +25,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.18"
+    plugin_version = "0.5.19"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -1717,21 +1717,45 @@ class SubtitleAgentBridge(_PluginBase):
         prefix = media_file.stem
         subtitle_prefix = f"{prefix}."
         media_key_variants = self.__subtitle_match_keys(prefix)
+        folder_key_variants = self.__subtitle_match_keys(media_file.parent.name)
         is_episode_media = bool(self._season_episode_pattern.search(prefix))
+        subtitle_candidates: List[Path] = []
+        sibling_videos = 0
+
         for candidate in media_file.parent.iterdir():
             if not candidate.is_file():
                 continue
             suffix = candidate.suffix.lower()
+            if self.__is_video_file(str(candidate)):
+                sibling_videos += 1
             if suffix not in self._subtitle_suffixes:
                 continue
+            subtitle_candidates.append(candidate)
+
             name = candidate.name
             if name == f"{prefix}{suffix}" or name.startswith(subtitle_prefix):
                 return True
             if is_episode_media or not media_key_variants:
                 continue
             candidate_key_variants = self.__subtitle_match_keys(candidate.stem)
-            if media_key_variants.intersection(candidate_key_variants):
+            if media_key_variants.intersection(candidate_key_variants) or folder_key_variants.intersection(
+                candidate_key_variants
+            ):
                 return True
+
+        if is_episode_media or not subtitle_candidates:
+            return False
+
+        # Movie folders are often one title with multiple resolutions; allow shared sidecar subtitles.
+        for candidate in subtitle_candidates:
+            candidate_key_variants = self.__subtitle_match_keys(candidate.stem)
+            if media_key_variants.intersection(candidate_key_variants) or folder_key_variants.intersection(
+                candidate_key_variants
+            ):
+                return True
+
+        if sibling_videos <= 3:
+            return True
         return False
 
     def __subtitle_match_keys(self, raw_name: str) -> set:
