@@ -59,6 +59,7 @@ class SubtitleAgentBridge(_PluginBase):
     _periodic_run_lock = threading.Lock()
     _media_probe_cache: Dict[str, Dict[str, Any]] = {}
     _nfo_chinese_cache: Dict[str, bool] = {}
+    _season_embedded_hint_cache: Dict[str, bool] = {}
     _dry_run_detail_limit: int = 500
     _auto_skip_cjk_documentary: bool = True
 
@@ -162,6 +163,11 @@ class SubtitleAgentBridge(_PluginBase):
         "/japan/",
         "/korea/",
     }
+    _anime_library_markers = {
+        "/日番/",
+        "/番剧/",
+        "/anime/",
+    }
     _probe_command_timeout_seconds = 15
     _season_episode_pattern = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})")
     _year_pattern = re.compile(r"\b(19\d{2}|20\d{2})\b")
@@ -202,6 +208,7 @@ class SubtitleAgentBridge(_PluginBase):
         self._manual_notice_cache = set()
         self._media_probe_cache = {}
         self._nfo_chinese_cache = {}
+        self._season_embedded_hint_cache = {}
         self.__start_periodic_worker()
 
     def get_state(self) -> bool:
@@ -1959,6 +1966,8 @@ class SubtitleAgentBridge(_PluginBase):
         probe = self.__probe_media_streams(media_file)
         if probe.get("has_embedded_subtitle"):
             return "媒体已内封字幕"
+        if self.__is_anime_library_path(normalized_path) and self.__has_embedded_subtitle_sibling_hint(media_file):
+            return "同季样本已识别内封字幕（规则推断）"
         if probe.get("has_chinese_audio"):
             return "媒体含中文音轨"
         return ""
@@ -2164,6 +2173,45 @@ class SubtitleAgentBridge(_PluginBase):
         show_name = re.sub(r"\(\d{4}\)", " ", show_segment)
         show_name = re.sub(r"\s+", " ", show_name).strip()
         return self.__is_mostly_cjk_text(show_name)
+
+    def __has_embedded_subtitle_sibling_hint(self, media_file: Path) -> bool:
+        season_dir = media_file.parent
+        season_key = self.__normalize_path(str(season_dir))
+        if season_key in self._season_embedded_hint_cache:
+            return bool(self._season_embedded_hint_cache.get(season_key))
+
+        files: List[Path] = []
+        try:
+            for candidate in sorted(season_dir.iterdir()):
+                if not candidate.is_file():
+                    continue
+                if not self.__is_video_file(str(candidate)):
+                    continue
+                files.append(candidate)
+                if len(files) >= 30:
+                    break
+        except Exception:
+            self._season_embedded_hint_cache[season_key] = False
+            return False
+
+        if len(files) < 4:
+            self._season_embedded_hint_cache[season_key] = False
+            return False
+
+        checked = 0
+        embedded_hits = 0
+        for candidate in files:
+            probe = self.__probe_media_streams(candidate)
+            checked += 1
+            if probe.get("has_embedded_subtitle"):
+                embedded_hits += 1
+
+        hint = checked >= 4 and embedded_hits >= 3 and (embedded_hits / max(checked, 1)) >= 0.4
+        self._season_embedded_hint_cache[season_key] = hint
+        return hint
+
+    def __is_anime_library_path(self, normalized_path: str) -> bool:
+        return any(marker in normalized_path for marker in self._anime_library_markers)
 
     @staticmethod
     def __is_mostly_cjk_text(text: str) -> bool:
