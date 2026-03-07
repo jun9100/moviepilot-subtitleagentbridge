@@ -60,6 +60,7 @@ class SubtitleAgentBridge(_PluginBase):
     _media_probe_cache: Dict[str, Dict[str, Any]] = {}
     _nfo_chinese_cache: Dict[str, bool] = {}
     _dry_run_detail_limit: int = 500
+    _auto_skip_cjk_documentary: bool = True
 
     _subtitle_suffixes = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
     _chinese_audio_lang_aliases = {
@@ -186,6 +187,7 @@ class SubtitleAgentBridge(_PluginBase):
         )
         self._manual_skip_keywords = str(config.get("manual_skip_keywords") or "")
         self._title_aliases = str(config.get("title_aliases") or "")
+        self._auto_skip_cjk_documentary = self.__to_bool(config.get("auto_skip_cjk_documentary"), default=True)
         self._auto_timing_sync = self.__to_bool(config.get("auto_timing_sync"), default=True)
         max_offset = self.__to_int(config.get("auto_timing_max_offset_seconds"))
         self._auto_timing_max_offset_seconds = max(10, min(max_offset or 120, 600))
@@ -454,7 +456,20 @@ class SubtitleAgentBridge(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12},
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "auto_skip_cjk_documentary",
+                                            "label": "自动跳过中文纪录片",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 8},
                                 "content": [
                                     {
                                         "component": "VTextField",
@@ -621,6 +636,7 @@ class SubtitleAgentBridge(_PluginBase):
             "exclude_keywords": "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache",
             "manual_skip_keywords": "",
             "title_aliases": "",
+            "auto_skip_cjk_documentary": True,
             "auto_timing_sync": True,
             "auto_timing_max_offset_seconds": 120,
             "periodic_enabled": False,
@@ -1935,6 +1951,8 @@ class SubtitleAgentBridge(_PluginBase):
             return "中文内容库（国产/华语目录）"
         if self.__is_chinese_by_nfo(media_file=media_file, parsed=parsed_ctx):
             return "媒体NFO标记为中文内容"
+        if self.__is_likely_cjk_documentary(media_file=media_file, parsed=parsed_ctx):
+            return "中文纪录片目录（规则推断）"
         if self.__is_likely_unclassified_cjk_series(media_file=media_file, parsed=parsed_ctx):
             return "未分类目录下中文剧集（规则推断）"
 
@@ -2113,6 +2131,39 @@ class SubtitleAgentBridge(_PluginBase):
         if not self.__is_mostly_cjk_text(show_segment):
             return False
         return True
+
+    def __is_likely_cjk_documentary(self, media_file: Path, parsed: Optional[Dict[str, Any]] = None) -> bool:
+        if not self._auto_skip_cjk_documentary:
+            return False
+
+        context = parsed or {}
+        if str(context.get("type") or "").lower() != "series":
+            return False
+
+        normalized_path = self.__normalize_path(str(media_file))
+        if "/tv/纪录片/" not in normalized_path:
+            return False
+        if any(marker in normalized_path for marker in self._foreign_library_markers):
+            return False
+
+        segments = [segment for segment in normalized_path.split("/") if segment]
+        if "tv" not in segments:
+            return False
+        tv_index = segments.index("tv")
+        if tv_index + 3 >= len(segments):
+            return False
+
+        category = segments[tv_index + 1]
+        show_segment = segments[tv_index + 2]
+        season_segment = segments[tv_index + 3]
+        if category != "纪录片":
+            return False
+        if not re.match(r"(?i)^season\s*\d+", season_segment):
+            return False
+
+        show_name = re.sub(r"\(\d{4}\)", " ", show_segment)
+        show_name = re.sub(r"\s+", " ", show_name).strip()
+        return self.__is_mostly_cjk_text(show_name)
 
     @staticmethod
     def __is_mostly_cjk_text(text: str) -> bool:
