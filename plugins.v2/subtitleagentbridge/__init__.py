@@ -25,7 +25,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.20"
+    plugin_version = "0.5.21"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -1213,7 +1213,7 @@ class SubtitleAgentBridge(_PluginBase):
                 "excluded": excluded,
                 "failed": failed,
                 "missing": len(missing_files),
-                "missing_files": missing_files[:200],
+                "missing_files": missing_files[: self._dry_run_detail_limit] if dry_run_flag else missing_files[:200],
                 "skipped_files": skipped_files[: self._dry_run_detail_limit] if dry_run_flag else [],
                 "items": downloaded[:50],
                 "errors": errors[:50],
