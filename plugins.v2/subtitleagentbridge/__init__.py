@@ -1999,7 +1999,7 @@ class SubtitleAgentBridge(_PluginBase):
         base_dir = media_file.parent
         if media_type == "series":
             for parent in media_file.parents[:3]:
-                if re.match(r"(?i)^season\\s*\\d+", parent.name):
+                if re.match(r"(?i)^season\s*\d+", parent.name):
                     base_dir = parent.parent
                     break
         return self.__normalize_path(str(base_dir))
@@ -2028,7 +2028,7 @@ class SubtitleAgentBridge(_PluginBase):
         if media_type == "series":
             show_root = media_file.parent
             for parent in media_file.parents[:3]:
-                if re.match(r"(?i)^season\\s*\\d+", parent.name):
+                if re.match(r"(?i)^season\s*\d+", parent.name):
                     show_root = parent.parent
                     break
             add_candidate(show_root / "tvshow.nfo")
@@ -2100,7 +2100,7 @@ class SubtitleAgentBridge(_PluginBase):
 
         show_segment = segments[tv_index + 1]
         season_segment = segments[tv_index + 2]
-        if not re.match(r"(?i)^season\\s*\\d+", season_segment):
+        if not re.match(r"(?i)^season\s*\d+", season_segment):
             return False
         if not self.__is_mostly_cjk_text(show_segment):
             return False
@@ -2111,7 +2111,7 @@ class SubtitleAgentBridge(_PluginBase):
         value = str(text or "").strip()
         if not value:
             return False
-        cjk = re.findall(r"[\\u3400-\\u4dbf\\u4e00-\\u9fff\\uf900-\\ufaff]", value)
+        cjk = re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", value)
         if not cjk:
             return False
         latin = re.findall(r"[a-zA-Z]", value)
