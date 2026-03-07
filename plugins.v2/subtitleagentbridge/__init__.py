@@ -4,7 +4,7 @@ import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 from urllib.request import Request, urlopen
 
 from app import schemas
@@ -24,7 +24,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.9"
+    plugin_version = "0.5.10"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -1914,6 +1914,10 @@ class SubtitleAgentBridge(_PluginBase):
             f"媒体: {media_name}",
             f"原因: {failure_message}",
         ]
+        failure_kind = self.__classify_manual_failure(failure_message)
+        failure_hint = self.__manual_failure_hint(failure_kind)
+        if failure_hint:
+            text_lines.append(f"建议: {failure_hint}")
         if target_file:
             text_lines.append(f"文件: {target_file}")
         if recommended_entry:
@@ -1932,6 +1936,14 @@ class SubtitleAgentBridge(_PluginBase):
                 deduped_copy_links.append(link)
             text_lines.append("复制全部链接：")
             text_lines.append("\n".join(deduped_copy_links))
+
+        search_keyword = self.__manual_search_keyword(media_name)
+        if search_keyword:
+            encoded = quote(search_keyword)
+            text_lines.append("可补充检索：")
+            text_lines.append(f"SubHD: https://subhd.tv/search/{encoded}")
+            text_lines.append(f"SubHD-TW: https://subhdtw.com/search/{encoded}")
+            text_lines.append(f"Assrt: https://assrt.net/sub/?searchword={encoded}")
 
         self.post_message(
             mtype=NotificationType.Plugin,
@@ -1960,6 +1972,40 @@ class SubtitleAgentBridge(_PluginBase):
         if not text or text.lower() in {"ok", "success", "none"}:
             return default
         return text
+
+    @staticmethod
+    def __classify_manual_failure(message: str) -> str:
+        text = str(message or "").strip().lower()
+        if "captcha" in text or "验证码" in text:
+            return "captcha"
+        if "timeout" in text or "timed out" in text or "超时" in text:
+            return "timeout"
+        if "未找到" in text or "not found" in text:
+            return "not_found"
+        if "no verified chinese" in text or "无可自动下载中文字幕" in text:
+            return "no_verified_chinese"
+        return "generic"
+
+    @staticmethod
+    def __manual_failure_hint(kind: str) -> str:
+        if kind == "captcha":
+            return "目标站点触发验证码，自动下载受限。请先在浏览器打开候选链接完成验证后再重试。"
+        if kind == "timeout":
+            return "请求超时。可稍后重试，或提高插件 HTTP 超时后再补字幕。"
+        if kind == "no_verified_chinese":
+            return "自动链路未命中可验证的中文字幕。可先手动下载候选字幕，后续等待新字幕再自动回填。"
+        if kind == "not_found":
+            return "当前源未检索到结果。可用片名别名或英文名重试。"
+        return ""
+
+    @staticmethod
+    def __manual_search_keyword(media_name: str) -> str:
+        text = str(media_name or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"\s+S\d{2}E\d{2}\b.*$", "", text)
+        text = re.sub(r"\s+\(\d{4}\)\s*$", "", text)
+        return text.strip()
 
     @staticmethod
     def __to_int(value: Any) -> Optional[int]:
