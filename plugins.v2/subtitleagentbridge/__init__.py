@@ -25,7 +25,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.19"
+    plugin_version = "0.5.20"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -192,6 +192,13 @@ class SubtitleAgentBridge(_PluginBase):
                 "methods": ["GET"],
                 "summary": "补齐目录字幕",
                 "description": "扫描目录中缺失字幕的视频文件并批量下载字幕。支持仅扫描刮削后目录，并排除整理前/刷流目录。",
+            },
+            {
+                "path": "/debug_subtitle_presence",
+                "endpoint": self.debug_subtitle_presence,
+                "methods": ["GET"],
+                "summary": "调试字幕判定",
+                "description": "返回指定媒体文件的字幕存在判定细节，便于排查误判。",
             },
         ]
 
@@ -1213,6 +1220,39 @@ class SubtitleAgentBridge(_PluginBase):
             },
         )
 
+    def debug_subtitle_presence(self, apikey: str, media_file: str) -> schemas.Response:
+        """
+        调试某个媒体文件的字幕存在判定：
+        /api/v1/plugin/SubtitleAgentBridge/debug_subtitle_presence
+        """
+        if apikey != settings.API_TOKEN:
+            return schemas.Response(success=False, message="API密钥错误")
+        if not media_file:
+            return schemas.Response(success=False, message="media_file 参数不能为空")
+
+        path = Path(str(media_file))
+        if not path.exists():
+            return schemas.Response(success=False, message=f"文件不存在: {media_file}")
+        if not path.is_file():
+            return schemas.Response(success=False, message=f"不是文件: {media_file}")
+        if not self.__is_video_file(str(path)):
+            return schemas.Response(success=False, message=f"不是视频文件: {media_file}")
+
+        parsed = self.__parse_media_context_from_file(path)
+        has_subtitle, detail = self.__has_subtitle_detail(path)
+        skip_reason = self.__skip_reason_for_media(path, parsed)
+        return schemas.Response(
+            success=True,
+            message="ok",
+            data={
+                "media_file": str(path),
+                "parsed": parsed,
+                "has_subtitle": has_subtitle,
+                "skip_reason": skip_reason,
+                "detail": detail,
+            },
+        )
+
     def __download_for_media_file(self, media_file: str, mediainfo: Any, meta: Any) -> Tuple[bool, str]:
         payload = self.__build_search_payload(mediainfo=mediainfo, meta=meta)
         items, message = self.__search_items(payload)
@@ -1714,6 +1754,10 @@ class SubtitleAgentBridge(_PluginBase):
             yield path
 
     def __has_subtitle(self, media_file: Path) -> bool:
+        present, _ = self.__has_subtitle_detail(media_file)
+        return present
+
+    def __has_subtitle_detail(self, media_file: Path) -> Tuple[bool, Dict[str, Any]]:
         prefix = media_file.stem
         subtitle_prefix = f"{prefix}."
         media_key_variants = self.__subtitle_match_keys(prefix)
@@ -1721,6 +1765,16 @@ class SubtitleAgentBridge(_PluginBase):
         is_episode_media = bool(self._season_episode_pattern.search(prefix))
         subtitle_candidates: List[Path] = []
         sibling_videos = 0
+        debug: Dict[str, Any] = {
+            "media_file": str(media_file),
+            "media_prefix": prefix,
+            "is_episode_media": is_episode_media,
+            "media_keys": sorted(media_key_variants),
+            "folder_keys": sorted(folder_key_variants),
+            "subtitle_candidates": [],
+            "sibling_videos": 0,
+            "matched_by": "",
+        }
 
         for candidate in media_file.parent.iterdir():
             if not candidate.is_file():
@@ -1733,18 +1787,30 @@ class SubtitleAgentBridge(_PluginBase):
             subtitle_candidates.append(candidate)
 
             name = candidate.name
+            candidate_key_variants = self.__subtitle_match_keys(candidate.stem)
+            debug["subtitle_candidates"].append(
+                {
+                    "path": str(candidate),
+                    "name": name,
+                    "keys": sorted(candidate_key_variants),
+                }
+            )
             if name == f"{prefix}{suffix}" or name.startswith(subtitle_prefix):
-                return True
+                debug["matched_by"] = "exact_name_or_prefix"
+                debug["sibling_videos"] = sibling_videos
+                return True, debug
             if is_episode_media or not media_key_variants:
                 continue
-            candidate_key_variants = self.__subtitle_match_keys(candidate.stem)
             if media_key_variants.intersection(candidate_key_variants) or folder_key_variants.intersection(
                 candidate_key_variants
             ):
-                return True
+                debug["matched_by"] = "key_intersection"
+                debug["sibling_videos"] = sibling_videos
+                return True, debug
 
+        debug["sibling_videos"] = sibling_videos
         if is_episode_media or not subtitle_candidates:
-            return False
+            return False, debug
 
         # Movie folders are often one title with multiple resolutions; allow shared sidecar subtitles.
         for candidate in subtitle_candidates:
@@ -1752,11 +1818,13 @@ class SubtitleAgentBridge(_PluginBase):
             if media_key_variants.intersection(candidate_key_variants) or folder_key_variants.intersection(
                 candidate_key_variants
             ):
-                return True
+                debug["matched_by"] = "movie_shared_key_intersection"
+                return True, debug
 
         if sibling_videos <= 3:
-            return True
-        return False
+            debug["matched_by"] = "movie_folder_with_subtitles"
+            return True, debug
+        return False, debug
 
     def __subtitle_match_keys(self, raw_name: str) -> set:
         cleaned = self.__clean_title_text(raw_name)
