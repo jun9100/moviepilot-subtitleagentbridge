@@ -24,7 +24,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.8"
+    plugin_version = "0.5.9"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -1853,6 +1853,7 @@ class SubtitleAgentBridge(_PluginBase):
 
         lines: List[str] = []
         seen_links = set()
+        seen_items = set()
         copy_links: List[str] = []
         recommended_entry = ""
         preferred = preferred_languages or self.__split_languages(self._languages)
@@ -1877,6 +1878,11 @@ class SubtitleAgentBridge(_PluginBase):
             copy_links.append(selected_link)
 
         for item in items:
+            dedup_item_key = self.__manual_item_dedup_key(item)
+            if dedup_item_key in seen_items:
+                continue
+            seen_items.add(dedup_item_key)
+
             raw_link = str(item.get("page_link") or "").strip()
             if not raw_link:
                 raw_download = str(item.get("download_url") or "").strip()
@@ -1932,6 +1938,21 @@ class SubtitleAgentBridge(_PluginBase):
             title="Subtitle Agent 需手动下载字幕",
             text="\n".join(text_lines),
         )
+
+    @staticmethod
+    def __provider_family(provider: Any) -> str:
+        text = str(provider or "").strip().lower()
+        if text in {"subhd", "subhdtw"}:
+            return "subhd-family"
+        return text or "unknown"
+
+    def __manual_item_dedup_key(self, item: dict) -> str:
+        provider = self.__provider_family(item.get("provider"))
+        subtitle_id = str(item.get("subtitle_id") or item.get("id") or "").strip()
+        title = str(item.get("name") or item.get("title") or "").strip().lower()
+        if subtitle_id:
+            return f"{provider}|{subtitle_id}"
+        return f"{provider}|{title}"
 
     @staticmethod
     def __normalize_failure_message(message: Any, default: str) -> str:
