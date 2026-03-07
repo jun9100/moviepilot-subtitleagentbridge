@@ -1,7 +1,7 @@
 import json
 import re
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urljoin
@@ -24,7 +24,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.6"
+    plugin_version = "0.5.7"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -47,7 +47,9 @@ class SubtitleAgentBridge(_PluginBase):
     _auto_timing_max_offset_seconds: int = 120
     _manual_notice_cache: set[str] = set()
     _periodic_enabled: bool = False
+    _periodic_mode: str = "interval"
     _periodic_interval_hours: int = 24
+    _periodic_daily_time: str = "03:30"
     _periodic_max_files: int = 200
     _periodic_recursive: bool = True
     _periodic_thread: Optional[threading.Thread] = None
@@ -82,8 +84,10 @@ class SubtitleAgentBridge(_PluginBase):
         max_offset = self.__to_int(config.get("auto_timing_max_offset_seconds"))
         self._auto_timing_max_offset_seconds = max(10, min(max_offset or 120, 600))
         self._periodic_enabled = self.__to_bool(config.get("periodic_enabled"), default=False)
+        self._periodic_mode = self.__normalize_periodic_mode(config.get("periodic_mode"))
         periodic_hours = self.__to_int(config.get("periodic_interval_hours"))
         self._periodic_interval_hours = max(1, min(periodic_hours or 24, 168))
+        self._periodic_daily_time = self.__normalize_daily_time(config.get("periodic_daily_time"))
         periodic_max_files = self.__to_int(config.get("periodic_max_files"))
         self._periodic_max_files = max(1, min(periodic_max_files or 200, 2000))
         self._periodic_recursive = self.__to_bool(config.get("periodic_recursive"), default=True)
@@ -178,6 +182,20 @@ class SubtitleAgentBridge(_PluginBase):
                                     {
                                         "component": "VTextField",
                                         "props": {
+                                            "model": "periodic_mode",
+                                            "label": "定期模式(interval/daily)",
+                                            "placeholder": "interval",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
                                             "model": "periodic_interval_hours",
                                             "label": "补字幕周期(小时)",
                                             "type": "number",
@@ -195,6 +213,20 @@ class SubtitleAgentBridge(_PluginBase):
                                             "model": "periodic_max_files",
                                             "label": "单次最多扫描文件数",
                                             "type": "number",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "periodic_daily_time",
+                                            "label": "每日执行时间(HH:MM)",
+                                            "placeholder": "03:30",
                                         },
                                     }
                                 ],
@@ -433,7 +465,9 @@ class SubtitleAgentBridge(_PluginBase):
             "auto_timing_sync": True,
             "auto_timing_max_offset_seconds": 120,
             "periodic_enabled": False,
+            "periodic_mode": "interval",
             "periodic_interval_hours": 24,
+            "periodic_daily_time": "03:30",
             "periodic_max_files": 200,
             "periodic_recursive": True,
         }
@@ -500,10 +534,17 @@ class SubtitleAgentBridge(_PluginBase):
         self._periodic_stop_event = stop_event
         self._periodic_thread = thread
         thread.start()
-        logger.info(
-            f"[SubtitleAgentBridge] 定期补字幕任务已启动: 每 {self._periodic_interval_hours} 小时执行一次，"
-            f"单次最多扫描 {self._periodic_max_files} 个文件"
-        )
+        mode = self.__normalize_periodic_mode(self._periodic_mode)
+        if mode == "daily":
+            logger.info(
+                f"[SubtitleAgentBridge] 定期补字幕任务已启动: 每日 {self._periodic_daily_time} 执行，"
+                f"单次最多扫描 {self._periodic_max_files} 个文件"
+            )
+        else:
+            logger.info(
+                f"[SubtitleAgentBridge] 定期补字幕任务已启动: 每 {self._periodic_interval_hours} 小时执行一次，"
+                f"单次最多扫描 {self._periodic_max_files} 个文件"
+            )
 
     def __stop_periodic_worker(self) -> None:
         stop_event = self._periodic_stop_event
@@ -516,6 +557,15 @@ class SubtitleAgentBridge(_PluginBase):
         self._periodic_thread = None
 
     def __periodic_worker_loop(self, stop_event: threading.Event) -> None:
+        mode = self.__normalize_periodic_mode(self._periodic_mode)
+        if mode == "daily":
+            while not stop_event.is_set():
+                wait_seconds = self.__seconds_until_daily_run(self._periodic_daily_time)
+                if stop_event.wait(wait_seconds):
+                    break
+                self.__run_periodic_backfill_once()
+            return
+
         interval_seconds = max(3600, int(self._periodic_interval_hours) * 3600)
         while not stop_event.is_set():
             self.__run_periodic_backfill_once()
@@ -1779,6 +1829,7 @@ class SubtitleAgentBridge(_PluginBase):
 
         lines: List[str] = []
         seen_links = set()
+        copy_links: List[str] = []
         recommended_entry = ""
         preferred = preferred_languages or self.__split_languages(self._languages)
         selected = self.__pick_item(items, preferred_languages=preferred)
@@ -1799,6 +1850,7 @@ class SubtitleAgentBridge(_PluginBase):
             selected_score = self.__to_int(selected.get("score"))
             score_suffix = f"（score={selected_score}）" if selected_score is not None else ""
             recommended_entry = f"[{selected_provider}/{selected_language}] {selected_name}{score_suffix}\n{selected_link}"
+            copy_links.append(selected_link)
 
         for item in items:
             raw_link = str(item.get("page_link") or "").strip()
@@ -1811,6 +1863,7 @@ class SubtitleAgentBridge(_PluginBase):
             if raw_link in seen_links:
                 continue
             seen_links.add(raw_link)
+            copy_links.append(raw_link)
 
             provider = str(item.get("provider") or "unknown")
             language = str(item.get("language") or "und")
@@ -1839,6 +1892,16 @@ class SubtitleAgentBridge(_PluginBase):
         text_lines.append("请手动下载以下候选字幕：")
         for index, entry in enumerate(lines, 1):
             text_lines.append(f"{index}. {entry}")
+        if copy_links:
+            deduped_copy_links: List[str] = []
+            seen_copy_links = set()
+            for link in copy_links:
+                if link in seen_copy_links:
+                    continue
+                seen_copy_links.add(link)
+                deduped_copy_links.append(link)
+            text_lines.append("复制全部链接：")
+            text_lines.append("\n".join(deduped_copy_links))
 
         self.post_message(
             mtype=NotificationType.Plugin,
@@ -1874,6 +1937,32 @@ class SubtitleAgentBridge(_PluginBase):
         if text in {"0", "false", "no", "off", "n"}:
             return False
         return default
+
+    @staticmethod
+    def __normalize_periodic_mode(value: Any) -> str:
+        mode = str(value or "").strip().lower()
+        if mode in {"daily", "day", "cron"}:
+            return "daily"
+        return "interval"
+
+    @staticmethod
+    def __normalize_daily_time(value: Any) -> str:
+        text = str(value or "").strip()
+        match = re.match(r"^(\d{1,2}):(\d{1,2})$", text)
+        if not match:
+            return "03:30"
+        hour = max(0, min(int(match.group(1)), 23))
+        minute = max(0, min(int(match.group(2)), 59))
+        return f"{hour:02d}:{minute:02d}"
+
+    def __seconds_until_daily_run(self, daily_time: str) -> int:
+        normalized = self.__normalize_daily_time(daily_time)
+        hour, minute = (int(part) for part in normalized.split(":"))
+        now = datetime.now()
+        next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if next_run <= now:
+            next_run = next_run + timedelta(days=1)
+        return max(1, int((next_run - now).total_seconds()))
 
     @staticmethod
     def __normalize_media_type(value: Any) -> str:

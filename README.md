@@ -31,7 +31,9 @@
 - `auto_timing_sync`: `true`（建议开启）
 - `auto_timing_max_offset_seconds`: `120`
 - `periodic_enabled`: `true`（建议开启，定期补齐已入库缺字幕文件）
+- `periodic_mode`: `interval` 或 `daily`（`daily` 为每天固定时间执行）
 - `periodic_interval_hours`: `24`
+- `periodic_daily_time`: `03:30`（`daily` 模式生效）
 - `periodic_max_files`: `200`
 - `periodic_recursive`: `true`
 
@@ -102,6 +104,7 @@ curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/backfil
 
 ## 版本说明（近期）
 
+- `v0.5.7`：定期任务支持每天固定时间执行（`daily HH:MM`），手动通知新增“复制全部链接”区块，便于一键复制。
 - `v0.5.6`：新增定期自动补字幕任务（面向已入库缺字幕文件），并在手动下载通知中增加“推荐优先下载项”。
 - `v0.5.5`：只要存在候选但自动下载失败（不限验证码场景），统一通过 MoviePilot 通知推送候选链接供手动下载。
 - `v0.5.4`：当候选字幕因验证码等原因无法自动下载时，自动通过 MoviePilot 通知推送候选下载链接供手动处理。
