@@ -2206,7 +2206,7 @@ class SubtitleAgentBridge(_PluginBase):
             if probe.get("has_embedded_subtitle"):
                 embedded_hits += 1
 
-        hint = checked >= 4 and embedded_hits >= 3 and (embedded_hits / max(checked, 1)) >= 0.4
+        hint = checked >= 4 and embedded_hits >= 3 and (embedded_hits / max(checked, 1)) >= 0.35
         self._season_embedded_hint_cache[season_key] = hint
         return hint
 
