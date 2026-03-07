@@ -25,7 +25,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.21"
+    plugin_version = "0.5.22"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -1763,12 +1763,14 @@ class SubtitleAgentBridge(_PluginBase):
         media_key_variants = self.__subtitle_match_keys(prefix)
         folder_key_variants = self.__subtitle_match_keys(media_file.parent.name)
         is_episode_media = bool(self._season_episode_pattern.search(prefix))
+        media_episode_key = self.__season_episode_key(prefix)
         subtitle_candidates: List[Path] = []
         sibling_videos = 0
         debug: Dict[str, Any] = {
             "media_file": str(media_file),
             "media_prefix": prefix,
             "is_episode_media": is_episode_media,
+            "media_episode_key": media_episode_key,
             "media_keys": sorted(media_key_variants),
             "folder_keys": sorted(folder_key_variants),
             "subtitle_candidates": [],
@@ -1788,10 +1790,12 @@ class SubtitleAgentBridge(_PluginBase):
 
             name = candidate.name
             candidate_key_variants = self.__subtitle_match_keys(candidate.stem)
+            candidate_episode_key = self.__season_episode_key(candidate.stem)
             debug["subtitle_candidates"].append(
                 {
                     "path": str(candidate),
                     "name": name,
+                    "episode_key": candidate_episode_key,
                     "keys": sorted(candidate_key_variants),
                 }
             )
@@ -1799,7 +1803,13 @@ class SubtitleAgentBridge(_PluginBase):
                 debug["matched_by"] = "exact_name_or_prefix"
                 debug["sibling_videos"] = sibling_videos
                 return True, debug
-            if is_episode_media or not media_key_variants:
+            if is_episode_media:
+                if media_episode_key and candidate_episode_key and media_episode_key == candidate_episode_key:
+                    debug["matched_by"] = "same_episode_key"
+                    debug["sibling_videos"] = sibling_videos
+                    return True, debug
+                continue
+            if not media_key_variants:
                 continue
             if media_key_variants.intersection(candidate_key_variants) or folder_key_variants.intersection(
                 candidate_key_variants
@@ -1825,6 +1835,14 @@ class SubtitleAgentBridge(_PluginBase):
             debug["matched_by"] = "movie_folder_with_subtitles"
             return True, debug
         return False, debug
+
+    def __season_episode_key(self, value: str) -> str:
+        match = self._season_episode_pattern.search(str(value or ""))
+        if not match:
+            return ""
+        season = int(match.group(1))
+        episode = int(match.group(2))
+        return f"s{season:02d}e{episode:02d}"
 
     def __subtitle_match_keys(self, raw_name: str) -> set:
         cleaned = self.__clean_title_text(raw_name)
