@@ -23,7 +23,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.4"
+    plugin_version = "0.5.5"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -1589,16 +1589,7 @@ class SubtitleAgentBridge(_PluginBase):
     @staticmethod
     def __requires_manual_download_notice(message: str) -> bool:
         lowered = str(message or "").strip().lower()
-        if not lowered:
-            return False
-        keywords = (
-            "captcha",
-            "验证码",
-            "cannot auto-download",
-            "requires captcha",
-            "手动",
-        )
-        return any(key in lowered for key in keywords)
+        return bool(lowered)
 
     def __maybe_notify_manual_download(
         self,

@@ -98,6 +98,7 @@ curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/backfil
 
 ## 版本说明（近期）
 
+- `v0.5.5`：只要存在候选但自动下载失败（不限验证码场景），统一通过 MoviePilot 通知推送候选链接供手动下载。
 - `v0.5.4`：当候选字幕因验证码等原因无法自动下载时，自动通过 MoviePilot 通知推送候选下载链接供手动处理。
 - `v0.5.3`：适配 Subtitle Agent `v0.1.5` 多源分层检索（`assrt/subhd -> podnapisi/tvsubtitles -> opensubtitles`）。
 - `v0.5.2`：新增自动字幕时间轴校正（参考同目录已有字幕，自动判断并平移）。
