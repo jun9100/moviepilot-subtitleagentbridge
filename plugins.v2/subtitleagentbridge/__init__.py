@@ -25,7 +25,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.16"
+    plugin_version = "0.5.17"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -43,6 +43,7 @@ class SubtitleAgentBridge(_PluginBase):
     _include_paths: str = ""
     _exclude_paths: str = ""
     _exclude_keywords: str = "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache"
+    _manual_skip_keywords: str = ""
     _title_aliases: str = ""
     _auto_timing_sync: bool = True
     _auto_timing_max_offset_seconds: int = 120
@@ -121,6 +122,7 @@ class SubtitleAgentBridge(_PluginBase):
         self._exclude_keywords = str(
             config.get("exclude_keywords") or "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache"
         )
+        self._manual_skip_keywords = str(config.get("manual_skip_keywords") or "")
         self._title_aliases = str(config.get("title_aliases") or "")
         self._auto_timing_sync = self.__to_bool(config.get("auto_timing_sync"), default=True)
         max_offset = self.__to_int(config.get("auto_timing_max_offset_seconds"))
@@ -387,6 +389,25 @@ class SubtitleAgentBridge(_PluginBase):
                                     {
                                         "component": "VTextField",
                                         "props": {
+                                            "model": "manual_skip_keywords",
+                                            "label": "手动跳过媒体关键词",
+                                            "placeholder": "哈尔的移动城堡,无需字幕示例片名",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
                                             "model": "title_aliases",
                                             "label": "标题别名映射",
                                             "placeholder": "短剧开始啦=コントが始まる; 黄石：法警小队=Marshals",
@@ -528,6 +549,7 @@ class SubtitleAgentBridge(_PluginBase):
             "include_paths": "",
             "exclude_paths": "",
             "exclude_keywords": "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache",
+            "manual_skip_keywords": "",
             "title_aliases": "",
             "auto_timing_sync": True,
             "auto_timing_max_offset_seconds": 120,
@@ -1696,6 +1718,10 @@ class SubtitleAgentBridge(_PluginBase):
         return variants
 
     def __skip_reason_for_media(self, media_file: Path, parsed: Optional[Dict[str, Any]] = None) -> str:
+        manual_hit = self.__match_manual_skip_keyword(media_file=media_file, parsed=parsed)
+        if manual_hit:
+            return f"命中手动跳过关键词: {manual_hit}"
+
         normalized_path = self.__normalize_path(str(media_file))
         if self.__is_chinese_library_path(normalized_path):
             return "中文内容库（国产/华语目录）"
@@ -1705,6 +1731,35 @@ class SubtitleAgentBridge(_PluginBase):
             return "媒体已内封字幕"
         if probe.get("has_chinese_audio"):
             return "媒体含中文音轨"
+        return ""
+
+    def __match_manual_skip_keyword(self, media_file: Path, parsed: Optional[Dict[str, Any]] = None) -> str:
+        keywords = self.__split_csv(self._manual_skip_keywords)
+        if not keywords:
+            return ""
+
+        parsed_title = ""
+        if isinstance(parsed, dict):
+            parsed_title = str(parsed.get("title") or "")
+
+        candidates = [
+            self.__normalize_path(str(media_file)),
+            self.__normalize_path(str(media_file.parent)),
+            self.__clean_title_text(media_file.stem).lower(),
+            self.__clean_title_text(media_file.parent.name).lower(),
+            self.__clean_title_text(parsed_title).lower(),
+        ]
+
+        for raw in keywords:
+            raw_text = str(raw or "").strip()
+            if not raw_text:
+                continue
+            normalized = self.__clean_title_text(raw_text).lower()
+            if not normalized:
+                normalized = raw_text.lower()
+            for candidate in candidates:
+                if candidate and normalized in candidate:
+                    return raw_text
         return ""
 
     def __is_chinese_library_path(self, normalized_path: str) -> bool:
