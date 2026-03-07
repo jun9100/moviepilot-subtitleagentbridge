@@ -23,7 +23,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.3"
+    plugin_version = "0.5.4"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -44,6 +44,7 @@ class SubtitleAgentBridge(_PluginBase):
     _title_aliases: str = ""
     _auto_timing_sync: bool = True
     _auto_timing_max_offset_seconds: int = 120
+    _manual_notice_cache: set[str] = set()
 
     _subtitle_suffixes = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
     _season_episode_pattern = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})")
@@ -71,6 +72,7 @@ class SubtitleAgentBridge(_PluginBase):
         self._auto_timing_sync = self.__to_bool(config.get("auto_timing_sync"), default=True)
         max_offset = self.__to_int(config.get("auto_timing_max_offset_seconds"))
         self._auto_timing_max_offset_seconds = max(10, min(max_offset or 120, 600))
+        self._manual_notice_cache = set()
 
     def get_state(self) -> bool:
         return self._enabled
@@ -511,7 +513,20 @@ class SubtitleAgentBridge(_PluginBase):
         )
         content, subtitle_format, message = self.__download_item(selected)
         if not content:
-            return schemas.Response(success=False, message=message or "下载字幕失败")
+            failure_message = self.__normalize_failure_message(message, "下载字幕失败")
+            self.__maybe_notify_manual_download(
+                media_name=self.__format_media_name(
+                    title=title,
+                    media_type=media_type,
+                    year=year,
+                    season=season,
+                    episode=episode,
+                ),
+                failure_message=failure_message,
+                items=items,
+                target_file=target_file,
+            )
+            return schemas.Response(success=False, message=failure_message)
 
         if not target_file:
             return schemas.Response(
@@ -687,9 +702,22 @@ class SubtitleAgentBridge(_PluginBase):
                     selected = self.__pick_item(items, preferred_languages=preferred_languages)
                     content, subtitle_format, message = self.__download_item(selected)
                     if not content:
+                        failure_message = self.__normalize_failure_message(message, "下载字幕失败")
+                        self.__maybe_notify_manual_download(
+                            media_name=self.__format_media_name(
+                                title=str(selected_title or parsed.get("title") or video_file.stem),
+                                media_type=str(parsed.get("type") or ""),
+                                year=self.__to_int(parsed.get("year")),
+                                season=self.__to_int(parsed.get("season")),
+                                episode=self.__to_int(parsed.get("episode")),
+                            ),
+                            failure_message=failure_message,
+                            items=items,
+                            target_file=str(video_file),
+                        )
                         failed += 1
                         errors.append(
-                            f"{video_file.name}: {self.__normalize_failure_message(message, '下载字幕失败')}"
+                            f"{video_file.name}: {failure_message}"
                         )
                         continue
 
@@ -795,7 +823,20 @@ class SubtitleAgentBridge(_PluginBase):
         selected = self.__pick_item(items)
         content, subtitle_format, message = self.__download_item(selected)
         if not content:
-            return False, message or "下载失败"
+            failure_message = self.__normalize_failure_message(message, "下载失败")
+            self.__maybe_notify_manual_download(
+                media_name=self.__format_media_name(
+                    title=str(payload.get("title") or Path(media_file).stem),
+                    media_type=str(payload.get("type") or ""),
+                    year=self.__to_int(payload.get("year")),
+                    season=self.__to_int(payload.get("season")),
+                    episode=self.__to_int(payload.get("episode")),
+                ),
+                failure_message=failure_message,
+                items=items,
+                target_file=media_file,
+            )
+            return False, failure_message
 
         subtitle_path = self.__build_subtitle_path(media_file, subtitle_format)
         subtitle_file = Path(subtitle_path)
@@ -1527,6 +1568,102 @@ class SubtitleAgentBridge(_PluginBase):
             if key and key in normalized_file:
                 return True
         return False
+
+    @staticmethod
+    def __format_media_name(
+        *,
+        title: str,
+        media_type: str = "",
+        year: Optional[int] = None,
+        season: Optional[int] = None,
+        episode: Optional[int] = None,
+    ) -> str:
+        base = str(title or "").strip() or "未知媒体"
+        media_key = str(media_type or "").strip().lower()
+        if media_key in {"series", "tv", "show", "episode"} and season and episode:
+            base = f"{base} S{int(season):02d}E{int(episode):02d}"
+        if year:
+            base = f"{base} ({int(year)})"
+        return base
+
+    @staticmethod
+    def __requires_manual_download_notice(message: str) -> bool:
+        lowered = str(message or "").strip().lower()
+        if not lowered:
+            return False
+        keywords = (
+            "captcha",
+            "验证码",
+            "cannot auto-download",
+            "requires captcha",
+            "手动",
+        )
+        return any(key in lowered for key in keywords)
+
+    def __maybe_notify_manual_download(
+        self,
+        *,
+        media_name: str,
+        failure_message: str,
+        items: List[dict],
+        target_file: str = "",
+    ) -> None:
+        if not self._notify:
+            return
+        if not self.__requires_manual_download_notice(failure_message):
+            return
+        if not items:
+            return
+
+        dedup_key = f"{media_name}|{target_file}|{failure_message}"
+        if dedup_key in self._manual_notice_cache:
+            return
+        self._manual_notice_cache.add(dedup_key)
+
+        lines: List[str] = []
+        seen_links = set()
+        for item in items:
+            raw_link = str(item.get("page_link") or "").strip()
+            if not raw_link:
+                raw_download = str(item.get("download_url") or "").strip()
+                if raw_download:
+                    raw_link = self.__compose_url(raw_download)
+            if not raw_link:
+                continue
+            if raw_link in seen_links:
+                continue
+            seen_links.add(raw_link)
+
+            provider = str(item.get("provider") or "unknown")
+            language = str(item.get("language") or "und")
+            subtitle_name = str(
+                item.get("name")
+                or item.get("title")
+                or item.get("subtitle_id")
+                or "字幕候选"
+            )
+            lines.append(f"[{provider}/{language}] {subtitle_name}\n{raw_link}")
+            if len(lines) >= 5:
+                break
+
+        if not lines:
+            return
+
+        text_lines = [
+            f"媒体: {media_name}",
+            f"原因: {failure_message}",
+        ]
+        if target_file:
+            text_lines.append(f"文件: {target_file}")
+        text_lines.append("请手动下载以下候选字幕：")
+        for index, entry in enumerate(lines, 1):
+            text_lines.append(f"{index}. {entry}")
+
+        self.post_message(
+            mtype=NotificationType.Plugin,
+            title="Subtitle Agent 需手动下载字幕",
+            text="\n".join(text_lines),
+        )
 
     @staticmethod
     def __normalize_failure_message(message: Any, default: str) -> str:
