@@ -24,7 +24,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.10"
+    plugin_version = "0.5.11"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -822,6 +822,7 @@ class SubtitleAgentBridge(_PluginBase):
         overwrite: bool = False,
         max_files: int = 200,
         limit: int = 0,
+        dry_run: bool = False,
     ) -> schemas.Response:
         """
         扫描目录里没有字幕的视频文件并批量下载字幕。
@@ -843,6 +844,7 @@ class SubtitleAgentBridge(_PluginBase):
         effective_limit = self.__to_int(limit) or self._limit
         if effective_limit <= 0:
             effective_limit = self._limit
+        dry_run_flag = self.__to_bool(dry_run, default=False)
 
         max_file_count = self.__to_int(max_files) or 200
         if max_file_count <= 0:
@@ -864,6 +866,7 @@ class SubtitleAgentBridge(_PluginBase):
         failed = 0
         errors: List[str] = []
         downloaded: List[Dict[str, Any]] = []
+        missing_files: List[Dict[str, Any]] = []
 
         matched = 0
         seen_identities = set()
@@ -899,6 +902,19 @@ class SubtitleAgentBridge(_PluginBase):
                         continue
 
                     parsed = self.__parse_media_context_from_file(video_file, forced_media_type=desired_type)
+                    if dry_run_flag:
+                        missing_files.append(
+                            {
+                                "video": str(video_file),
+                                "title": parsed.get("title") or video_file.stem,
+                                "type": parsed.get("type"),
+                                "year": parsed.get("year"),
+                                "season": parsed.get("season"),
+                                "episode": parsed.get("episode"),
+                            }
+                        )
+                        continue
+
                     if not parsed.get("title"):
                         failed += 1
                         errors.append(f"{video_file.name}: 无法从文件名解析标题")
@@ -1011,24 +1027,38 @@ class SubtitleAgentBridge(_PluginBase):
             "skipped": skipped,
             "excluded": excluded,
             "failed": failed,
+            "dry_run": dry_run_flag,
+            "missing": len(missing_files),
             "errors": errors,
         }
         self.save_data("last_result", result)
 
         if self._notify:
-            text = (
-                f"补字幕完成，共扫描 {processed} 个视频，成功 {success} 个，"
-                f"跳过 {skipped} 个，排除 {excluded} 个，失败 {failed} 个"
-            )
+            if dry_run_flag:
+                text = (
+                    f"缺字幕扫描完成，共扫描 {processed} 个视频，"
+                    f"缺字幕 {len(missing_files)} 个，跳过 {skipped} 个，排除 {excluded} 个"
+                )
+            else:
+                text = (
+                    f"补字幕完成，共扫描 {processed} 个视频，成功 {success} 个，"
+                    f"跳过 {skipped} 个，排除 {excluded} 个，失败 {failed} 个"
+                )
             if errors:
                 text = f"{text}\n" + "\n".join(errors[:5])
             self.post_message(
                 mtype=NotificationType.Plugin,
-                title="Subtitle Agent 补字幕结果",
+                title="Subtitle Agent 扫描结果" if dry_run_flag else "Subtitle Agent 补字幕结果",
                 text=text,
             )
 
-        message = f"扫描 {processed} 个视频，成功 {success}，跳过 {skipped}，排除 {excluded}，失败 {failed}"
+        if dry_run_flag:
+            message = (
+                f"扫描 {processed} 个视频，缺字幕 {len(missing_files)}，"
+                f"跳过 {skipped}，排除 {excluded}"
+            )
+        else:
+            message = f"扫描 {processed} 个视频，成功 {success}，跳过 {skipped}，排除 {excluded}，失败 {failed}"
         return schemas.Response(
             success=failed == 0,
             message=message,
@@ -1037,6 +1067,7 @@ class SubtitleAgentBridge(_PluginBase):
                 "scan_roots": [str(path) for path in scan_roots],
                 "recursive": recursive_flag,
                 "overwrite": overwrite_flag,
+                "dry_run": dry_run_flag,
                 "name_contains": name_filter,
                 "include_paths": included_paths,
                 "exclude_paths": excluded_paths,
@@ -1047,6 +1078,8 @@ class SubtitleAgentBridge(_PluginBase):
                 "skipped": skipped,
                 "excluded": excluded,
                 "failed": failed,
+                "missing": len(missing_files),
+                "missing_files": missing_files[:200],
                 "items": downloaded[:50],
                 "errors": errors[:50],
             },
