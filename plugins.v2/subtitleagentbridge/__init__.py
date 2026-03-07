@@ -1,5 +1,6 @@
 import json
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -23,7 +24,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.5"
+    plugin_version = "0.5.6"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -45,12 +46,20 @@ class SubtitleAgentBridge(_PluginBase):
     _auto_timing_sync: bool = True
     _auto_timing_max_offset_seconds: int = 120
     _manual_notice_cache: set[str] = set()
+    _periodic_enabled: bool = False
+    _periodic_interval_hours: int = 24
+    _periodic_max_files: int = 200
+    _periodic_recursive: bool = True
+    _periodic_thread: Optional[threading.Thread] = None
+    _periodic_stop_event: Optional[threading.Event] = None
+    _periodic_run_lock = threading.Lock()
 
     _subtitle_suffixes = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
     _season_episode_pattern = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})")
     _year_pattern = re.compile(r"\b(19\d{2}|20\d{2})\b")
 
     def init_plugin(self, config: dict = None):
+        self.__stop_periodic_worker()
         if not config:
             return
 
@@ -72,7 +81,14 @@ class SubtitleAgentBridge(_PluginBase):
         self._auto_timing_sync = self.__to_bool(config.get("auto_timing_sync"), default=True)
         max_offset = self.__to_int(config.get("auto_timing_max_offset_seconds"))
         self._auto_timing_max_offset_seconds = max(10, min(max_offset or 120, 600))
+        self._periodic_enabled = self.__to_bool(config.get("periodic_enabled"), default=False)
+        periodic_hours = self.__to_int(config.get("periodic_interval_hours"))
+        self._periodic_interval_hours = max(1, min(periodic_hours or 24, 168))
+        periodic_max_files = self.__to_int(config.get("periodic_max_files"))
+        self._periodic_max_files = max(1, min(periodic_max_files or 200, 2000))
+        self._periodic_recursive = self.__to_bool(config.get("periodic_recursive"), default=True)
         self._manual_notice_cache = set()
+        self.__start_periodic_worker()
 
     def get_state(self) -> bool:
         return self._enabled
@@ -140,6 +156,64 @@ class SubtitleAgentBridge(_PluginBase):
                                     }
                                 ],
                             },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {"model": "periodic_enabled", "label": "定期自动补字幕"},
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "periodic_interval_hours",
+                                            "label": "补字幕周期(小时)",
+                                            "type": "number",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "periodic_max_files",
+                                            "label": "单次最多扫描文件数",
+                                            "type": "number",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {"model": "periodic_recursive", "label": "定期任务递归扫描"},
+                                    }
+                                ],
+                            }
                         ],
                     },
                     {
@@ -358,6 +432,10 @@ class SubtitleAgentBridge(_PluginBase):
             "title_aliases": "",
             "auto_timing_sync": True,
             "auto_timing_max_offset_seconds": 120,
+            "periodic_enabled": False,
+            "periodic_interval_hours": 24,
+            "periodic_max_files": 200,
+            "periodic_recursive": True,
         }
 
     def get_page(self) -> List[dict]:
@@ -399,7 +477,91 @@ class SubtitleAgentBridge(_PluginBase):
         ]
 
     def stop_service(self):
-        pass
+        self.__stop_periodic_worker()
+
+    def __start_periodic_worker(self) -> None:
+        if not self._enabled or not self._periodic_enabled:
+            return
+        if not self._host:
+            logger.warn("[SubtitleAgentBridge] 定期补字幕已启用但未配置 Subtitle Agent 地址，已跳过启动")
+            return
+        include_paths = self.__merge_csv_values(self._include_paths)
+        if not include_paths:
+            logger.warn("[SubtitleAgentBridge] 定期补字幕已启用但未配置仅扫描目录，已跳过启动")
+            return
+
+        stop_event = threading.Event()
+        thread = threading.Thread(
+            target=self.__periodic_worker_loop,
+            args=(stop_event,),
+            name="SubtitleAgentBridgePeriodic",
+            daemon=True,
+        )
+        self._periodic_stop_event = stop_event
+        self._periodic_thread = thread
+        thread.start()
+        logger.info(
+            f"[SubtitleAgentBridge] 定期补字幕任务已启动: 每 {self._periodic_interval_hours} 小时执行一次，"
+            f"单次最多扫描 {self._periodic_max_files} 个文件"
+        )
+
+    def __stop_periodic_worker(self) -> None:
+        stop_event = self._periodic_stop_event
+        thread = self._periodic_thread
+        if stop_event is not None:
+            stop_event.set()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2)
+        self._periodic_stop_event = None
+        self._periodic_thread = None
+
+    def __periodic_worker_loop(self, stop_event: threading.Event) -> None:
+        interval_seconds = max(3600, int(self._periodic_interval_hours) * 3600)
+        while not stop_event.is_set():
+            self.__run_periodic_backfill_once()
+            if stop_event.wait(interval_seconds):
+                break
+
+    def __run_periodic_backfill_once(self) -> None:
+        if not self._enabled or not self._periodic_enabled:
+            return
+        if not self._host:
+            return
+
+        include_paths = self.__merge_csv_values(self._include_paths)
+        if not include_paths:
+            return
+
+        if not self._periodic_run_lock.acquire(blocking=False):
+            logger.info("[SubtitleAgentBridge] 定期补字幕任务仍在执行中，跳过本轮")
+            return
+
+        try:
+            response = self.backfill_directory(
+                apikey=settings.API_TOKEN,
+                directory=include_paths[0],
+                recursive=self._periodic_recursive,
+                media_type="",
+                languages=self._languages,
+                name_contains="",
+                include_paths="",
+                exclude_paths="",
+                exclude_keywords="",
+                title_aliases="",
+                overwrite=self._overwrite,
+                max_files=self._periodic_max_files,
+                limit=self._limit,
+            )
+            success = bool(getattr(response, "success", False))
+            message = str(getattr(response, "message", ""))
+            if success:
+                logger.info(f"[SubtitleAgentBridge] 定期补字幕完成: {message}")
+            else:
+                logger.warn(f"[SubtitleAgentBridge] 定期补字幕失败: {message}")
+        except Exception as err:
+            logger.error(f"[SubtitleAgentBridge] 定期补字幕异常: {str(err)}")
+        finally:
+            self._periodic_run_lock.release()
 
     @eventmanager.register(EventType.TransferComplete)
     def download_on_transfer_complete(self, event: Event):
@@ -525,6 +687,7 @@ class SubtitleAgentBridge(_PluginBase):
                 failure_message=failure_message,
                 items=items,
                 target_file=target_file,
+                preferred_languages=self.__split_languages(languages or self._languages),
             )
             return schemas.Response(success=False, message=failure_message)
 
@@ -714,6 +877,7 @@ class SubtitleAgentBridge(_PluginBase):
                             failure_message=failure_message,
                             items=items,
                             target_file=str(video_file),
+                            preferred_languages=preferred_languages,
                         )
                         failed += 1
                         errors.append(
@@ -835,6 +999,7 @@ class SubtitleAgentBridge(_PluginBase):
                 failure_message=failure_message,
                 items=items,
                 target_file=media_file,
+                preferred_languages=self.__split_languages(self._languages),
             )
             return False, failure_message
 
@@ -1598,6 +1763,7 @@ class SubtitleAgentBridge(_PluginBase):
         failure_message: str,
         items: List[dict],
         target_file: str = "",
+        preferred_languages: Optional[List[str]] = None,
     ) -> None:
         if not self._notify:
             return
@@ -1613,6 +1779,27 @@ class SubtitleAgentBridge(_PluginBase):
 
         lines: List[str] = []
         seen_links = set()
+        recommended_entry = ""
+        preferred = preferred_languages or self.__split_languages(self._languages)
+        selected = self.__pick_item(items, preferred_languages=preferred)
+        selected_link = str(selected.get("page_link") or "").strip()
+        if not selected_link:
+            raw_download = str(selected.get("download_url") or "").strip()
+            if raw_download:
+                selected_link = self.__compose_url(raw_download)
+        if selected_link:
+            selected_provider = str(selected.get("provider") or "unknown")
+            selected_language = str(selected.get("language") or "und")
+            selected_name = str(
+                selected.get("name")
+                or selected.get("title")
+                or selected.get("subtitle_id")
+                or "字幕候选"
+            )
+            selected_score = self.__to_int(selected.get("score"))
+            score_suffix = f"（score={selected_score}）" if selected_score is not None else ""
+            recommended_entry = f"[{selected_provider}/{selected_language}] {selected_name}{score_suffix}\n{selected_link}"
+
         for item in items:
             raw_link = str(item.get("page_link") or "").strip()
             if not raw_link:
@@ -1646,6 +1833,9 @@ class SubtitleAgentBridge(_PluginBase):
         ]
         if target_file:
             text_lines.append(f"文件: {target_file}")
+        if recommended_entry:
+            text_lines.append("推荐优先下载：")
+            text_lines.append(recommended_entry)
         text_lines.append("请手动下载以下候选字幕：")
         for index, entry in enumerate(lines, 1):
             text_lines.append(f"{index}. {entry}")
