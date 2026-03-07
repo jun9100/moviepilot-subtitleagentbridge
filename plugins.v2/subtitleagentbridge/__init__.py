@@ -24,7 +24,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.7"
+    plugin_version = "0.5.8"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -171,7 +171,7 @@ class SubtitleAgentBridge(_PluginBase):
                                 "content": [
                                     {
                                         "component": "VSwitch",
-                                        "props": {"model": "periodic_enabled", "label": "定期自动补字幕"},
+                                        "props": {"model": "periodic_enabled", "label": "启用定期自动补字幕"},
                                     }
                                 ],
                             },
@@ -180,11 +180,14 @@ class SubtitleAgentBridge(_PluginBase):
                                 "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
-                                        "component": "VTextField",
+                                        "component": "VSelect",
                                         "props": {
                                             "model": "periodic_mode",
-                                            "label": "定期模式(interval/daily)",
-                                            "placeholder": "interval",
+                                            "label": "执行方式",
+                                            "items": [
+                                                {"title": "每隔 N 小时（推荐）", "value": "interval"},
+                                                {"title": "每天固定时间", "value": "daily"},
+                                            ],
                                         },
                                     }
                                 ],
@@ -197,36 +200,9 @@ class SubtitleAgentBridge(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "periodic_interval_hours",
-                                            "label": "补字幕周期(小时)",
+                                            "label": "循环间隔(小时)",
                                             "type": "number",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "periodic_max_files",
-                                            "label": "单次最多扫描文件数",
-                                            "type": "number",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "periodic_daily_time",
-                                            "label": "每日执行时间(HH:MM)",
-                                            "placeholder": "03:30",
+                                            "placeholder": "24",
                                         },
                                     }
                                 ],
@@ -241,11 +217,59 @@ class SubtitleAgentBridge(_PluginBase):
                                 "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
-                                        "component": "VSwitch",
-                                        "props": {"model": "periodic_recursive", "label": "定期任务递归扫描"},
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "periodic_daily_time",
+                                            "label": "每日执行时间(HH:MM)",
+                                            "placeholder": "03:30",
+                                        },
                                     }
                                 ],
-                            }
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "periodic_max_files",
+                                            "label": "单次最多扫描文件数",
+                                            "type": "number",
+                                            "placeholder": "200",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {"model": "periodic_recursive", "label": "扫描子目录(递归)"},
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "text": "定期任务使用说明：执行方式选“每隔 N 小时”时只看“循环间隔”；选“每天固定时间”时只看“每日执行时间”。其余配置建议保持默认即可。",
+                                        },
+                                    }
+                                ],
+                            },
                         ],
                     },
                     {
