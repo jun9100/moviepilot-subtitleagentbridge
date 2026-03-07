@@ -25,7 +25,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.22"
+    plugin_version = "0.5.23"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -58,6 +58,7 @@ class SubtitleAgentBridge(_PluginBase):
     _periodic_stop_event: Optional[threading.Event] = None
     _periodic_run_lock = threading.Lock()
     _media_probe_cache: Dict[str, Dict[str, Any]] = {}
+    _nfo_chinese_cache: Dict[str, bool] = {}
     _dry_run_detail_limit: int = 500
 
     _subtitle_suffixes = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
@@ -130,6 +131,22 @@ class SubtitleAgentBridge(_PluginBase):
         "中字",
         "字幕",
     }
+    _nfo_chinese_country_markers = {"china", "cn", "中国", "中国大陆", "大陆", "hong kong", "香港", "taiwan", "台湾"}
+    _nfo_chinese_language_markers = {
+        "zh",
+        "zho",
+        "chi",
+        "chs",
+        "cht",
+        "cmn",
+        "yue",
+        "chinese",
+        "mandarin",
+        "国语",
+        "普通话",
+        "中文",
+        "粤语",
+    }
     _probe_command_timeout_seconds = 15
     _season_episode_pattern = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})")
     _year_pattern = re.compile(r"\b(19\d{2}|20\d{2})\b")
@@ -168,6 +185,7 @@ class SubtitleAgentBridge(_PluginBase):
         self._periodic_recursive = self.__to_bool(config.get("periodic_recursive"), default=True)
         self._manual_notice_cache = set()
         self._media_probe_cache = {}
+        self._nfo_chinese_cache = {}
         self.__start_periodic_worker()
 
     def get_state(self) -> bool:
@@ -1889,9 +1907,12 @@ class SubtitleAgentBridge(_PluginBase):
         if manual_hit:
             return f"命中手动跳过关键词: {manual_hit}"
 
+        parsed_ctx = parsed or self.__parse_media_context_from_file(media_file)
         normalized_path = self.__normalize_path(str(media_file))
         if self.__is_chinese_library_path(normalized_path):
             return "中文内容库（国产/华语目录）"
+        if self.__is_chinese_by_nfo(media_file=media_file, parsed=parsed_ctx):
+            return "媒体NFO标记为中文内容"
 
         probe = self.__probe_media_streams(media_file)
         if probe.get("has_embedded_subtitle"):
@@ -1936,6 +1957,113 @@ class SubtitleAgentBridge(_PluginBase):
         for segment in [item for item in normalized_path.split("/") if item]:
             if any(keyword in segment for keyword in self._chinese_library_keywords):
                 return True
+        return False
+
+    def __is_chinese_by_nfo(self, media_file: Path, parsed: Optional[Dict[str, Any]] = None) -> bool:
+        cache_key = self.__nfo_cache_key(media_file=media_file, parsed=parsed)
+        if cache_key and cache_key in self._nfo_chinese_cache:
+            return bool(self._nfo_chinese_cache.get(cache_key))
+
+        result = False
+        for nfo in self.__related_nfo_files(media_file=media_file, parsed=parsed):
+            text = self.__read_text_file_safe(nfo, max_bytes=512 * 1024)
+            if not text:
+                continue
+            if self.__nfo_indicates_chinese(text):
+                result = True
+                break
+
+        if cache_key:
+            self._nfo_chinese_cache[cache_key] = result
+        return result
+
+    def __nfo_cache_key(self, media_file: Path, parsed: Optional[Dict[str, Any]] = None) -> str:
+        context = parsed or {}
+        media_type = str(context.get("type") or "").lower()
+        base_dir = media_file.parent
+        if media_type == "series":
+            for parent in media_file.parents[:3]:
+                if re.match(r"(?i)^season\\s*\\d+", parent.name):
+                    base_dir = parent.parent
+                    break
+        return self.__normalize_path(str(base_dir))
+
+    def __related_nfo_files(self, media_file: Path, parsed: Optional[Dict[str, Any]] = None) -> List[Path]:
+        context = parsed or {}
+        media_type = str(context.get("type") or "").lower()
+        candidates: List[Path] = []
+        seen = set()
+
+        def add_candidate(path: Path) -> None:
+            try:
+                key = self.__normalize_path(str(path))
+                if key in seen:
+                    return
+                seen.add(key)
+                if path.exists() and path.is_file() and path.suffix.lower() == ".nfo":
+                    candidates.append(path)
+            except Exception:
+                return
+
+        add_candidate(media_file.with_suffix(".nfo"))
+        add_candidate(media_file.parent / "movie.nfo")
+        add_candidate(media_file.parent / "tvshow.nfo")
+
+        if media_type == "series":
+            show_root = media_file.parent
+            for parent in media_file.parents[:3]:
+                if re.match(r"(?i)^season\\s*\\d+", parent.name):
+                    show_root = parent.parent
+                    break
+            add_candidate(show_root / "tvshow.nfo")
+            add_candidate(show_root / f"{show_root.name}.nfo")
+            try:
+                for path in sorted(show_root.glob("*.nfo"))[:5]:
+                    add_candidate(path)
+            except Exception:
+                pass
+        else:
+            movie_root = media_file.parent
+            add_candidate(movie_root / f"{movie_root.name}.nfo")
+            try:
+                for path in sorted(movie_root.glob("*.nfo"))[:5]:
+                    add_candidate(path)
+            except Exception:
+                pass
+
+        return candidates
+
+    @staticmethod
+    def __read_text_file_safe(path: Path, max_bytes: int = 262_144) -> str:
+        try:
+            raw = path.read_bytes()[:max_bytes]
+        except Exception:
+            return ""
+
+        for encoding in ("utf-8", "utf-8-sig", "gb18030", "big5"):
+            try:
+                return raw.decode(encoding, errors="ignore").lower()
+            except Exception:
+                continue
+        return raw.decode("latin-1", errors="ignore").lower()
+
+    def __nfo_indicates_chinese(self, text: str) -> bool:
+        lowered = str(text or "").lower()
+        if not lowered:
+            return False
+
+        for marker in self._nfo_chinese_country_markers:
+            if re.search(rf"<country>[^<]*{re.escape(marker)}[^<]*</country>", lowered):
+                return True
+            if re.search(rf"<countrycode>[^<]*{re.escape(marker)}[^<]*</countrycode>", lowered):
+                return True
+
+        for marker in self._nfo_chinese_language_markers:
+            if re.search(rf"<(?:original)?language>[^<]*{re.escape(marker)}[^<]*</(?:original)?language>", lowered):
+                return True
+            if re.search(rf"<audio(?:language)?>[^<]*{re.escape(marker)}[^<]*</audio(?:language)?>", lowered):
+                return True
+
         return False
 
     def __probe_media_streams(self, media_file: Path) -> Dict[str, Any]:
