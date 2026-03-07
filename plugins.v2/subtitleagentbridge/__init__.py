@@ -25,7 +25,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.17"
+    plugin_version = "0.5.18"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -98,6 +98,37 @@ class SubtitleAgentBridge(_PluginBase):
         "cctv",
         "中配",
         "国配",
+    }
+    _subtitle_name_noise_tokens = {
+        "chi",
+        "zho",
+        "chs",
+        "cht",
+        "zh",
+        "zhcn",
+        "zhtw",
+        "cn",
+        "tw",
+        "eng",
+        "en",
+        "jpn",
+        "jp",
+        "kor",
+        "kr",
+        "sub",
+        "subs",
+        "subtitle",
+        "subtitles",
+        "srt",
+        "ass",
+        "ssa",
+        "vtt",
+        "简体",
+        "繁体",
+        "简繁",
+        "双语",
+        "中字",
+        "字幕",
     }
     _probe_command_timeout_seconds = 15
     _season_episode_pattern = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})")
@@ -1707,7 +1738,7 @@ class SubtitleAgentBridge(_PluginBase):
         cleaned = self.__clean_title_text(raw_name)
         if not cleaned:
             return set()
-        normalized = re.sub(r"\s+", " ", cleaned).strip().lower()
+        normalized = self.__normalize_subtitle_name_for_match(cleaned)
         if not normalized:
             return set()
         variants = {normalized}
@@ -1715,7 +1746,33 @@ class SubtitleAgentBridge(_PluginBase):
         without_year = re.sub(r"\s+", " ", without_year).strip()
         if without_year:
             variants.add(without_year)
+        first_part = re.split(r"\s+-\s+", normalized, maxsplit=1)[0].strip()
+        if first_part:
+            variants.add(first_part)
         return variants
+
+    def __normalize_subtitle_name_for_match(self, value: str) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        text = re.sub(r"[_\.]+", " ", text)
+        text = re.sub(r"[-\u2013\u2014]+", " - ", text)
+        text = re.sub(r"\bzh[-_ ]?cn\b", " zhcn ", text)
+        text = re.sub(r"\bzh[-_ ]?tw\b", " zhtw ", text)
+        text = re.sub(r"\bzh[-_ ]?hans\b", " zhcn ", text)
+        text = re.sub(r"\bzh[-_ ]?hant\b", " zhtw ", text)
+        filtered_tokens: List[str] = []
+        for token in re.split(r"\s+", text):
+            item = token.strip()
+            if not item:
+                continue
+            if item in self._subtitle_name_noise_tokens:
+                continue
+            filtered_tokens.append(item)
+        normalized = " ".join(filtered_tokens)
+        normalized = re.sub(r"\s*-\s*", " - ", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip(" -")
+        return normalized
 
     def __skip_reason_for_media(self, media_file: Path, parsed: Optional[Dict[str, Any]] = None) -> str:
         manual_hit = self.__match_manual_skip_keyword(media_file=media_file, parsed=parsed)
