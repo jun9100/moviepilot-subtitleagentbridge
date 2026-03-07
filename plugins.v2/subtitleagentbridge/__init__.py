@@ -968,6 +968,7 @@ class SubtitleAgentBridge(_PluginBase):
         overwrite: bool = False,
         max_files: int = 200,
         limit: int = 0,
+        detail_limit: int = 0,
         dry_run: bool = False,
     ) -> schemas.Response:
         """
@@ -995,6 +996,10 @@ class SubtitleAgentBridge(_PluginBase):
         max_file_count = self.__to_int(max_files) or 200
         if max_file_count <= 0:
             max_file_count = 200
+        detail_count = self.__to_int(detail_limit) or self._dry_run_detail_limit
+        if detail_count <= 0:
+            detail_count = self._dry_run_detail_limit
+        detail_count = min(detail_count, 10000)
         name_keyword = str(name_contains or "").strip()
         name_filter = name_keyword.lower()
         included_paths = self.__merge_csv_values(self._include_paths, include_paths)
@@ -1046,7 +1051,7 @@ class SubtitleAgentBridge(_PluginBase):
 
                     if not overwrite_flag and self.__has_subtitle(video_file):
                         skipped += 1
-                        if dry_run_flag and len(skipped_files) < self._dry_run_detail_limit:
+                        if dry_run_flag and len(skipped_files) < detail_count:
                             skipped_files.append(
                                 {
                                     "video": str(video_file),
@@ -1059,7 +1064,7 @@ class SubtitleAgentBridge(_PluginBase):
                     skip_reason = self.__skip_reason_for_media(video_file, parsed)
                     if skip_reason:
                         skipped += 1
-                        if dry_run_flag and len(skipped_files) < self._dry_run_detail_limit:
+                        if dry_run_flag and len(skipped_files) < detail_count:
                             skipped_files.append(
                                 {
                                     "video": str(video_file),
@@ -1187,6 +1192,7 @@ class SubtitleAgentBridge(_PluginBase):
 
         result = {
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "scanned": processed,
             "total": processed,
             "success": success,
             "skipped": skipped,
@@ -1239,14 +1245,16 @@ class SubtitleAgentBridge(_PluginBase):
                 "exclude_paths": excluded_paths,
                 "exclude_keywords": excluded_keywords,
                 "languages": selected_languages,
+                "scanned": processed,
+                "processed": processed,
                 "total": processed,
                 "success": success,
                 "skipped": skipped,
                 "excluded": excluded,
                 "failed": failed,
                 "missing": len(missing_files),
-                "missing_files": missing_files[: self._dry_run_detail_limit] if dry_run_flag else missing_files[:200],
-                "skipped_files": skipped_files[: self._dry_run_detail_limit] if dry_run_flag else [],
+                "missing_files": missing_files[:detail_count] if dry_run_flag else missing_files[:200],
+                "skipped_files": skipped_files[:detail_count] if dry_run_flag else [],
                 "items": downloaded[:50],
                 "errors": errors[:50],
             },
