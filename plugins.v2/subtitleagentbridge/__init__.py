@@ -25,7 +25,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.14"
+    plugin_version = "0.5.15"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -1645,6 +1645,8 @@ class SubtitleAgentBridge(_PluginBase):
     def __has_subtitle(self, media_file: Path) -> bool:
         prefix = media_file.stem
         subtitle_prefix = f"{prefix}."
+        media_key_variants = self.__subtitle_match_keys(prefix)
+        is_episode_media = bool(self._season_episode_pattern.search(prefix))
         for candidate in media_file.parent.iterdir():
             if not candidate.is_file():
                 continue
@@ -1654,7 +1656,26 @@ class SubtitleAgentBridge(_PluginBase):
             name = candidate.name
             if name == f"{prefix}{suffix}" or name.startswith(subtitle_prefix):
                 return True
+            if is_episode_media or not media_key_variants:
+                continue
+            candidate_key_variants = self.__subtitle_match_keys(candidate.stem)
+            if media_key_variants.intersection(candidate_key_variants):
+                return True
         return False
+
+    def __subtitle_match_keys(self, raw_name: str) -> set:
+        cleaned = self.__clean_title_text(raw_name)
+        if not cleaned:
+            return set()
+        normalized = re.sub(r"\s+", " ", cleaned).strip().lower()
+        if not normalized:
+            return set()
+        variants = {normalized}
+        without_year = re.sub(r"\b(?:19|20)\d{2}\b", " ", normalized)
+        without_year = re.sub(r"\s+", " ", without_year).strip()
+        if without_year:
+            variants.add(without_year)
+        return variants
 
     def __skip_reason_for_media(self, media_file: Path, parsed: Optional[Dict[str, Any]] = None) -> str:
         normalized_path = self.__normalize_path(str(media_file))
