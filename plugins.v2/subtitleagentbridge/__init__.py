@@ -25,7 +25,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.24"
+    plugin_version = "0.5.30"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -62,6 +62,7 @@ class SubtitleAgentBridge(_PluginBase):
     _season_embedded_hint_cache: Dict[str, bool] = {}
     _dry_run_detail_limit: int = 500
     _auto_skip_cjk_documentary: bool = True
+    _notify_success_detail_limit: int = 5
 
     _subtitle_suffixes = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
     _chinese_audio_lang_aliases = {
@@ -665,6 +666,10 @@ class SubtitleAgentBridge(_PluginBase):
             f"排除数: {last_result.get('excluded') or 0}",
             f"失败数: {last_result.get('failed') or 0}",
         ]
+        success_details = last_result.get("success_details") or []
+        if success_details:
+            lines.append("成功详情:")
+            lines.extend(success_details[:10])
         errors = last_result.get("errors") or []
         if errors:
             lines.append("失败详情:")
@@ -819,6 +824,7 @@ class SubtitleAgentBridge(_PluginBase):
         success = 0
         skipped = 0
         errors = []
+        success_details = []
         include_paths = self.__merge_csv_values(self._include_paths)
         excluded_paths = self.__merge_csv_values(self._exclude_paths)
         excluded_keywords = self.__merge_csv_values(self._exclude_keywords)
@@ -850,6 +856,9 @@ class SubtitleAgentBridge(_PluginBase):
             )
             if state:
                 success += 1
+                success_details.append(
+                    f"{Path(media_file).name} -> {self.__format_success_target(message)}"
+                )
             else:
                 errors.append(f"{Path(media_file).name}: {message}")
 
@@ -863,12 +872,16 @@ class SubtitleAgentBridge(_PluginBase):
             "success": success,
             "skipped": skipped,
             "failed": failed,
+            "success_details": success_details[:200],
             "errors": errors,
         }
         self.save_data("last_result", result)
 
         if self._notify:
             text = f"处理 {total} 个视频，成功 {success} 个，跳过 {skipped} 个，失败 {failed} 个"
+            success_lines = self.__render_success_details(success_details)
+            if success_lines:
+                text = f"{text}\n成功详情:\n" + "\n".join(success_lines)
             if errors:
                 text = f"{text}\n" + "\n".join(errors[:5])
             self.post_message(
@@ -1224,6 +1237,10 @@ class SubtitleAgentBridge(_PluginBase):
             "dry_run": dry_run_flag,
             "missing": len(missing_files),
             "skipped_files": skipped_files[:200],
+            "success_details": [
+                self.__format_backfill_success_detail(item)
+                for item in downloaded[:200]
+            ],
             "errors": errors,
         }
         self.save_data("last_result", result)
@@ -1239,6 +1256,11 @@ class SubtitleAgentBridge(_PluginBase):
                     f"补字幕完成，共扫描 {processed} 个视频，成功 {success} 个，"
                     f"跳过 {skipped} 个，排除 {excluded} 个，失败 {failed} 个"
                 )
+                success_lines = self.__render_success_details(
+                    [self.__format_backfill_success_detail(item) for item in downloaded]
+                )
+                if success_lines:
+                    text = f"{text}\n成功详情:\n" + "\n".join(success_lines)
             if errors:
                 text = f"{text}\n" + "\n".join(errors[:5])
             self.post_message(
@@ -1282,6 +1304,36 @@ class SubtitleAgentBridge(_PluginBase):
                 "errors": errors[:50],
             },
         )
+
+    def __format_success_target(self, raw: Any) -> str:
+        text = str(raw or "").strip()
+        if not text:
+            return "-"
+        main = text.split(" (", 1)[0].strip()
+        if not main:
+            return text
+        return Path(main).name or main
+
+    def __format_backfill_success_detail(self, item: Dict[str, Any]) -> str:
+        video_name = Path(str(item.get("video") or "")).name
+        subtitle_name = Path(str(item.get("subtitle") or "")).name
+        provider = str(item.get("provider") or "-").strip() or "-"
+        sync_note = str(item.get("sync") or "").strip()
+        detail = f"{video_name} -> {subtitle_name} [{provider}]"
+        if sync_note:
+            detail = f"{detail} ({sync_note})"
+        return detail
+
+    def __render_success_details(self, details: List[str]) -> List[str]:
+        clean = [str(item).strip() for item in details if str(item).strip()]
+        if not clean:
+            return []
+        limit = max(1, self._notify_success_detail_limit)
+        lines = clean[:limit]
+        remaining = len(clean) - len(lines)
+        if remaining > 0:
+            lines.append(f"... 其余 {remaining} 条请在插件“查看数据”中查看")
+        return lines
 
     def debug_subtitle_presence(self, apikey: str, media_file: str) -> schemas.Response:
         """
