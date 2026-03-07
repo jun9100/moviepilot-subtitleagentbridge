@@ -25,7 +25,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.23"
+    plugin_version = "0.5.24"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -146,6 +146,20 @@ class SubtitleAgentBridge(_PluginBase):
         "普通话",
         "中文",
         "粤语",
+    }
+    _foreign_library_markers = {
+        "/日韩剧/",
+        "/欧美剧/",
+        "/韩剧/",
+        "/日剧/",
+        "/美剧/",
+        "/英剧/",
+        "/外语电影/",
+        "/欧美电影/",
+        "/日本/",
+        "/韩国/",
+        "/japan/",
+        "/korea/",
     }
     _probe_command_timeout_seconds = 15
     _season_episode_pattern = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})")
@@ -1913,6 +1927,8 @@ class SubtitleAgentBridge(_PluginBase):
             return "中文内容库（国产/华语目录）"
         if self.__is_chinese_by_nfo(media_file=media_file, parsed=parsed_ctx):
             return "媒体NFO标记为中文内容"
+        if self.__is_likely_unclassified_cjk_series(media_file=media_file, parsed=parsed_ctx):
+            return "未分类目录下中文剧集（规则推断）"
 
         probe = self.__probe_media_streams(media_file)
         if probe.get("has_embedded_subtitle"):
@@ -2065,6 +2081,42 @@ class SubtitleAgentBridge(_PluginBase):
                 return True
 
         return False
+
+    def __is_likely_unclassified_cjk_series(self, media_file: Path, parsed: Optional[Dict[str, Any]] = None) -> bool:
+        context = parsed or {}
+        if str(context.get("type") or "").lower() != "series":
+            return False
+
+        normalized_path = self.__normalize_path(str(media_file))
+        if any(marker in normalized_path for marker in self._foreign_library_markers):
+            return False
+
+        segments = [segment for segment in normalized_path.split("/") if segment]
+        if "tv" not in segments:
+            return False
+        tv_index = segments.index("tv")
+        if tv_index + 2 >= len(segments):
+            return False
+
+        show_segment = segments[tv_index + 1]
+        season_segment = segments[tv_index + 2]
+        if not re.match(r"(?i)^season\\s*\\d+", season_segment):
+            return False
+        if not self.__is_mostly_cjk_text(show_segment):
+            return False
+        return True
+
+    @staticmethod
+    def __is_mostly_cjk_text(text: str) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return False
+        cjk = re.findall(r"[\\u3400-\\u4dbf\\u4e00-\\u9fff\\uf900-\\ufaff]", value)
+        if not cjk:
+            return False
+        latin = re.findall(r"[a-zA-Z]", value)
+        # Avoid skipping titles with obvious latin content.
+        return len(latin) == 0
 
     def __probe_media_streams(self, media_file: Path) -> Dict[str, Any]:
         cache_key = self.__media_probe_cache_key(media_file)
