@@ -25,7 +25,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.15"
+    plugin_version = "0.5.16"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -57,6 +57,7 @@ class SubtitleAgentBridge(_PluginBase):
     _periodic_stop_event: Optional[threading.Event] = None
     _periodic_run_lock = threading.Lock()
     _media_probe_cache: Dict[str, Dict[str, Any]] = {}
+    _dry_run_detail_limit: int = 500
 
     _subtitle_suffixes = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
     _chinese_audio_lang_aliases = {
@@ -920,6 +921,7 @@ class SubtitleAgentBridge(_PluginBase):
         errors: List[str] = []
         downloaded: List[Dict[str, Any]] = []
         missing_files: List[Dict[str, Any]] = []
+        skipped_files: List[Dict[str, Any]] = []
 
         matched = 0
         seen_identities = set()
@@ -952,12 +954,26 @@ class SubtitleAgentBridge(_PluginBase):
 
                     if not overwrite_flag and self.__has_subtitle(video_file):
                         skipped += 1
+                        if dry_run_flag and len(skipped_files) < self._dry_run_detail_limit:
+                            skipped_files.append(
+                                {
+                                    "video": str(video_file),
+                                    "reason": "已有外挂字幕",
+                                }
+                            )
                         continue
 
                     parsed = self.__parse_media_context_from_file(video_file, forced_media_type=desired_type)
                     skip_reason = self.__skip_reason_for_media(video_file, parsed)
                     if skip_reason:
                         skipped += 1
+                        if dry_run_flag and len(skipped_files) < self._dry_run_detail_limit:
+                            skipped_files.append(
+                                {
+                                    "video": str(video_file),
+                                    "reason": skip_reason,
+                                }
+                            )
                         continue
                     if dry_run_flag:
                         missing_files.append(
@@ -1086,6 +1102,7 @@ class SubtitleAgentBridge(_PluginBase):
             "failed": failed,
             "dry_run": dry_run_flag,
             "missing": len(missing_files),
+            "skipped_files": skipped_files[:200],
             "errors": errors,
         }
         self.save_data("last_result", result)
@@ -1137,6 +1154,7 @@ class SubtitleAgentBridge(_PluginBase):
                 "failed": failed,
                 "missing": len(missing_files),
                 "missing_files": missing_files[:200],
+                "skipped_files": skipped_files[: self._dry_run_detail_limit] if dry_run_flag else [],
                 "items": downloaded[:50],
                 "errors": errors[:50],
             },
