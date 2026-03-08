@@ -31,7 +31,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.44"
+    plugin_version = "0.5.45"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -1493,7 +1493,15 @@ class SubtitleAgentBridge(_PluginBase):
 
         latest_tasks = self.__load_captcha_tasks()
         latest_task = latest_tasks.get(normalized_task_id)
-        view_data = self.__captcha_task_view_data(task_id=normalized_task_id, task=latest_task) if latest_task else None
+        view_data = (
+            self.__captcha_task_view_data(
+                task_id=normalized_task_id,
+                task=latest_task,
+                apikey=apikey,
+            )
+            if latest_task
+            else None
+        )
 
         result_text = ""
         result_ok = False
@@ -3540,7 +3548,7 @@ class SubtitleAgentBridge(_PluginBase):
                     else ""
                 )
                 task["web_url"] = self.__compose_web_url(
-                    f"/api/v1/plugin/SubtitleAgentBridge/captcha_web?token={task['web_token']}"
+                    self.__build_captcha_web_path(task["web_token"])
                 )
                 return task
 
@@ -3565,7 +3573,7 @@ class SubtitleAgentBridge(_PluginBase):
         self.__save_captcha_tasks(tasks)
         task["task_id"] = task_id
         task["image_url"] = self.__compose_url(image_path) if (image_path and image_available) else ""
-        task["web_url"] = self.__compose_web_url(f"/api/v1/plugin/SubtitleAgentBridge/captcha_web?token={web_token}")
+        task["web_url"] = self.__compose_web_url(self.__build_captcha_web_path(web_token))
         return task
 
     def __find_captcha_task_id_by_web_token(self, token: str) -> str:
@@ -3580,7 +3588,7 @@ class SubtitleAgentBridge(_PluginBase):
                 return str(task_id or "").strip().lower()
         return ""
 
-    def __captcha_task_view_data(self, *, task_id: str, task: Optional[dict]) -> Optional[dict]:
+    def __captcha_task_view_data(self, *, task_id: str, task: Optional[dict], apikey: str = "") -> Optional[dict]:
         if not isinstance(task, dict):
             return None
         normalized_task_id = str(task_id or "").strip().lower()
@@ -3597,7 +3605,7 @@ class SubtitleAgentBridge(_PluginBase):
         image_path = str(task.get("image_path") or "").strip()
         image_available = bool(task.get("image_available"))
         image_url = self.__compose_url(image_path) if (image_available and image_path) else ""
-        web_url = self.__compose_web_url(f"/api/v1/plugin/SubtitleAgentBridge/captcha_web?token={web_token}") if web_token else ""
+        web_url = self.__compose_web_url(self.__build_captcha_web_path(web_token)) if web_token else ""
         return {
             "captcha_task_id": normalized_task_id,
             "challenge_id": str(task.get("challenge_id") or "").strip(),
@@ -3606,6 +3614,7 @@ class SubtitleAgentBridge(_PluginBase):
             "web_url": web_url,
             "reply_format": f"/subcap {normalized_task_id} 图中字母",
             "token": web_token,
+            "apikey": str(apikey or settings.API_TOKEN or ""),
             "media_name": str(task.get("media_name") or "").strip(),
             "target_file": str(task.get("target_file") or "").strip(),
         }
@@ -3636,6 +3645,7 @@ class SubtitleAgentBridge(_PluginBase):
             )
 
         token = escape(str(task_data.get("token") or ""))
+        apikey = escape(str(task_data.get("apikey") or ""))
         media_name = escape(str(task_data.get("media_name") or "未知媒体"))
         task_id = escape(str(task_data.get("captcha_task_id") or ""))
         image_url = str(task_data.get("image_url") or "").strip()
@@ -3676,12 +3686,14 @@ class SubtitleAgentBridge(_PluginBase):
   <div style='margin:14px 0;'>{image_block}{detail_block}</div>
   <form method='get' action='' style='display:flex;gap:8px;align-items:center;flex-wrap:wrap;'>
     <input type='hidden' name='token' value='{token}' />
+    <input type='hidden' name='apikey' value='{apikey}' />
     <input type='text' name='code' placeholder='输入验证码字母' autocomplete='off'
       style='flex:1;min-width:180px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;' />
     <button type='submit' style='padding:10px 14px;border:0;border-radius:8px;background:#2563eb;color:#fff;'>提交验证码</button>
   </form>
   <form method='get' action='' style='margin-top:10px;'>
     <input type='hidden' name='token' value='{token}' />
+    <input type='hidden' name='apikey' value='{apikey}' />
     <input type='hidden' name='action' value='refresh' />
     <button type='submit' style='padding:9px 13px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;'>刷新验证码</button>
   </form>
@@ -3996,7 +4008,10 @@ class SubtitleAgentBridge(_PluginBase):
                 target_file=str(task.get("target_file") or ""),
             )
             if not isinstance(data, dict):
-                data = self.__captcha_task_view_data(task_id=normalized_task_id, task=tasks.get(normalized_task_id))
+                data = self.__captcha_task_view_data(
+                    task_id=normalized_task_id,
+                    task=tasks.get(normalized_task_id),
+                )
             return schemas.Response(success=False, message="验证码已刷新，请填写最新验证码", data=data)
 
         fallback_data = self.__captcha_task_view_data(task_id=normalized_task_id, task=task)
@@ -4220,3 +4235,9 @@ class SubtitleAgentBridge(_PluginBase):
         if not base:
             return value
         return urljoin(f"{base}/", value.lstrip("/"))
+
+    def __build_captcha_web_path(self, web_token: str) -> str:
+        token = str(web_token or "").strip()
+        if not token:
+            return "/api/v1/plugin/SubtitleAgentBridge/captcha_web"
+        return f"/api/v1/plugin/SubtitleAgentBridge/captcha_web?token={token}&apikey={settings.API_TOKEN}"
