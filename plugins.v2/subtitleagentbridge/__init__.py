@@ -4,6 +4,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 from html import escape
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -11,6 +12,7 @@ from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
+from fastapi import Request as FastAPIRequest
 from fastapi.responses import HTMLResponse
 from app import schemas
 from app.core.config import settings
@@ -31,7 +33,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.45"
+    plugin_version = "0.5.46"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -41,6 +43,7 @@ class SubtitleAgentBridge(_PluginBase):
     _enabled: bool = False
     _host: str = ""
     _web_base_url: str = ""
+    _runtime_web_base_url: str = ""
     _search_path: str = "/api/v1/moviepilot/subtitles/search"
     _languages: str = "zh-cn,zh-tw"
     _limit: int = 5
@@ -77,6 +80,7 @@ class SubtitleAgentBridge(_PluginBase):
     _recent_captcha_submit_lock = threading.Lock()
     _recent_captcha_submits: Dict[str, float] = {}
     _refresh_code_keywords = {"refresh", "reload", "new", "again"}
+    _target_resolve_scan_limit: int = 3000
 
     _subtitle_suffixes = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
     _chinese_audio_lang_aliases = {
@@ -195,6 +199,7 @@ class SubtitleAgentBridge(_PluginBase):
         self._enabled = bool(config.get("enabled"))
         self._host = self.__normalize_host(config.get("host"))
         self._web_base_url = self.__normalize_host(config.get("web_base_url"))
+        self._runtime_web_base_url = ""
         self._search_path = str(config.get("search_path") or "/api/v1/moviepilot/subtitles/search")
         self._languages = str(config.get("languages") or "zh-cn,zh-tw")
         self._limit = int(config.get("limit") or 5)
@@ -244,13 +249,6 @@ class SubtitleAgentBridge(_PluginBase):
                 "data": {"action": "subtitle_agent_subcap"},
             },
             {
-                "cmd": "/Subcap",
-                "event": EventType.PluginAction,
-                "desc": "提交字幕验证码: /Subcap 任务ID 验证码",
-                "category": "字幕",
-                "data": {"action": "subtitle_agent_subcap"},
-            },
-            {
                 "cmd": "/substatus",
                 "event": EventType.PluginAction,
                 "desc": "查询字幕任务状态: /substatus [任务ID]",
@@ -258,21 +256,7 @@ class SubtitleAgentBridge(_PluginBase):
                 "data": {"action": "subtitle_agent_substatus"},
             },
             {
-                "cmd": "/Substatus",
-                "event": EventType.PluginAction,
-                "desc": "查询字幕任务状态: /Substatus [任务ID]",
-                "category": "字幕",
-                "data": {"action": "subtitle_agent_substatus"},
-            },
-            {
                 "cmd": "/subhelp",
-                "event": EventType.PluginAction,
-                "desc": "查看字幕验证码命令帮助",
-                "category": "字幕",
-                "data": {"action": "subtitle_agent_subhelp"},
-            },
-            {
-                "cmd": "/Subhelp",
                 "event": EventType.PluginAction,
                 "desc": "查看字幕验证码命令帮助",
                 "category": "字幕",
@@ -1133,6 +1117,7 @@ class SubtitleAgentBridge(_PluginBase):
         episode: int = None,
         target_file: str = "",
         languages: str = "",
+        request: FastAPIRequest = None,
     ) -> schemas.Response:
         """
         手动触发字幕下载，可由插件API调用：
@@ -1140,6 +1125,7 @@ class SubtitleAgentBridge(_PluginBase):
         """
         if apikey != settings.API_TOKEN:
             return schemas.Response(success=False, message="API密钥错误")
+        self.__remember_web_base_url(request)
 
         payload = {
             "title": title,
@@ -1178,6 +1164,11 @@ class SubtitleAgentBridge(_PluginBase):
                 target_file=target_file,
                 preferred_languages=self.__split_languages(languages or self._languages),
                 error_data=error_data,
+                title=title,
+                media_type=media_type,
+                year=year,
+                season=season,
+                episode=episode,
             )
             response_data = self.__captcha_task_response_data(
                 error_data=error_data,
@@ -1189,9 +1180,22 @@ class SubtitleAgentBridge(_PluginBase):
                     episode=episode,
                 ),
                 target_file=target_file,
+                title=title,
+                media_type=media_type,
+                year=year,
+                season=season,
+                episode=episode,
             )
             return schemas.Response(success=False, message=failure_message, data=response_data)
 
+        target_file = self.__resolve_target_file_for_write(
+            target_file=target_file,
+            title=title,
+            media_type=media_type,
+            year=year,
+            season=season,
+            episode=episode,
+        )
         if not target_file:
             return schemas.Response(
                 success=True,
@@ -1244,9 +1248,11 @@ class SubtitleAgentBridge(_PluginBase):
         episode: int = None,
         target_file: str = "",
         languages: str = "",
+        request: FastAPIRequest = None,
     ) -> schemas.Response:
         if apikey != settings.API_TOKEN:
             return schemas.Response(success=False, message="API密钥错误")
+        self.__remember_web_base_url(request)
 
         media_name = self.__format_media_name(
             title=title,
@@ -1353,7 +1359,7 @@ class SubtitleAgentBridge(_PluginBase):
             return "\n".join(
                 [
                     f"任务ID: {normalized}",
-                    f"状态: {job.get('status')}",
+                    f"状态: {self.__human_job_status(job.get('status'))}",
                     f"媒体: {job.get('media_name') or job.get('title') or '未知媒体'}",
                     f"更新时间: {job.get('updated_at')}",
                     f"结果: {job.get('message') or ''}",
@@ -1368,11 +1374,26 @@ class SubtitleAgentBridge(_PluginBase):
         lines = ["最近任务："]
         for item in items[:5]:
             lines.append(
-                f"{item.get('job_id')} | {item.get('status')} | "
+                f"{item.get('job_id')} | {self.__human_job_status(item.get('status'))} | "
                 f"{item.get('media_name') or item.get('title') or '未知媒体'} | "
                 f"{item.get('updated_at')}"
             )
         return "\n".join(lines)
+
+    @staticmethod
+    def __human_job_status(status: Any) -> str:
+        key = str(status or "").strip().lower()
+        if key == "captcha_required":
+            return "等待验证码"
+        if key == "queued":
+            return "排队中"
+        if key == "running":
+            return "执行中"
+        if key == "success":
+            return "成功"
+        if key == "failed":
+            return "失败"
+        return key or "未知"
 
     def __run_manual_download_job(
         self,
@@ -1403,7 +1424,17 @@ class SubtitleAgentBridge(_PluginBase):
                 target_file=target_file,
                 languages=languages,
             )
-            status = "success" if response.success else "failed"
+            captcha_required = bool(
+                (not response.success)
+                and isinstance(response.data, dict)
+                and str(response.data.get("captcha_task_id") or "").strip()
+            )
+            if response.success:
+                status = "success"
+            elif captcha_required:
+                status = "captcha_required"
+            else:
+                status = "failed"
             self.__update_manual_job(
                 job_id=job_id,
                 status=status,
@@ -1412,6 +1443,9 @@ class SubtitleAgentBridge(_PluginBase):
             )
 
             if self._notify:
+                if captcha_required:
+                    logger.info(f"[SubtitleAgentBridge] 异步任务 {job_id} 已进入验证码流程，跳过重复失败通知")
+                    return
                 notice_title = "Subtitle Agent 异步任务成功" if response.success else "Subtitle Agent 异步任务失败"
                 lines = [f"任务ID: {job_id}", f"媒体: {media_name}"]
                 notice_image = None
@@ -1455,9 +1489,10 @@ class SubtitleAgentBridge(_PluginBase):
                     text=f"任务ID: {job_id}\n媒体: {media_name}\n{message}",
                 )
 
-    def submit_captcha(self, apikey: str, task_id: str, code: str) -> schemas.Response:
+    def submit_captcha(self, apikey: str, task_id: str, code: str, request: FastAPIRequest = None) -> schemas.Response:
         if apikey != settings.API_TOKEN:
             return schemas.Response(success=False, message="API密钥错误")
+        self.__remember_web_base_url(request)
         return self.__submit_captcha_task(task_id=task_id, code=code)
 
     def captcha_web(
@@ -1467,7 +1502,9 @@ class SubtitleAgentBridge(_PluginBase):
         code: str = "",
         action: str = "",
         apikey: str = "",
+        request: FastAPIRequest = None,
     ) -> HTMLResponse:
+        self.__remember_web_base_url(request)
         normalized_token = str(token or "").strip().lower()
         normalized_task_id = str(task_id or "").strip().lower()
         if not normalized_task_id and normalized_token:
@@ -1702,6 +1739,11 @@ class SubtitleAgentBridge(_PluginBase):
                             target_file=str(video_file),
                             preferred_languages=preferred_languages,
                             error_data=error_data,
+                            title=str(selected_title or parsed.get("title") or video_file.stem),
+                            media_type=str(parsed.get("type") or ""),
+                            year=self.__to_int(parsed.get("year")),
+                            season=self.__to_int(parsed.get("season")),
+                            episode=self.__to_int(parsed.get("episode")),
                         )
                         failed += 1
                         errors.append(
@@ -1919,6 +1961,11 @@ class SubtitleAgentBridge(_PluginBase):
                 target_file=media_file,
                 preferred_languages=self.__split_languages(self._languages),
                 error_data=error_data,
+                title=str(payload.get("title") or ""),
+                media_type=str(payload.get("type") or ""),
+                year=self.__to_int(payload.get("year")),
+                season=self.__to_int(payload.get("season")),
+                episode=self.__to_int(payload.get("episode")),
             )
             return False, failure_message
 
@@ -3138,6 +3185,135 @@ class SubtitleAgentBridge(_PluginBase):
             fmt = "srt"
         return str(Path(media_file).with_suffix(f".{fmt}"))
 
+    def __resolve_target_file_for_write(
+        self,
+        *,
+        target_file: str,
+        title: str = "",
+        media_type: str = "",
+        year: Optional[int] = None,
+        season: Optional[int] = None,
+        episode: Optional[int] = None,
+    ) -> str:
+        raw_target = str(target_file or "").strip()
+        if not raw_target:
+            return ""
+
+        target_path = Path(raw_target)
+        if target_path.exists() and target_path.is_file() and self.__is_video_file(str(target_path)):
+            return str(target_path)
+
+        if not self.__should_resolve_target_file(raw_target):
+            return raw_target
+
+        include_paths = self.__merge_csv_values(self._include_paths)
+        roots = self.__collect_scan_roots(directory="", include_paths=include_paths)
+        if not roots:
+            return raw_target
+
+        expected_type = self.__normalize_media_type(media_type)
+        expected_year = self.__to_int(year)
+        expected_season = self.__to_int(season)
+        expected_episode = self.__to_int(episode)
+        expected_title = self.__clean_title_text(title).lower()
+        if not expected_title:
+            expected_title = self.__clean_title_text(Path(raw_target).stem).lower()
+
+        best_path: Optional[Path] = None
+        best_score = 0
+        scanned = 0
+
+        for root in roots:
+            for candidate in self.__iter_video_files(root, recursive=True):
+                scanned += 1
+                if scanned > self._target_resolve_scan_limit:
+                    break
+                parsed = self.__parse_media_context_from_file(candidate, forced_media_type=expected_type)
+                score = self.__score_target_candidate(
+                    parsed=parsed,
+                    expected_title=expected_title,
+                    expected_type=expected_type,
+                    expected_year=expected_year,
+                    expected_season=expected_season,
+                    expected_episode=expected_episode,
+                )
+                if score > best_score:
+                    best_score = score
+                    best_path = candidate
+            if scanned > self._target_resolve_scan_limit:
+                break
+
+        if best_path and best_score >= 55:
+            logger.info(
+                f"[SubtitleAgentBridge] 自动修正 target_file: {raw_target} -> {best_path} (score={best_score})"
+            )
+            return str(best_path)
+        return raw_target
+
+    def __score_target_candidate(
+        self,
+        *,
+        parsed: Dict[str, Any],
+        expected_title: str,
+        expected_type: str,
+        expected_year: Optional[int],
+        expected_season: Optional[int],
+        expected_episode: Optional[int],
+    ) -> int:
+        score = 0
+        parsed_title = self.__clean_title_text(parsed.get("title") or "").lower()
+        parsed_type = self.__normalize_media_type(parsed.get("type"))
+        parsed_year = self.__to_int(parsed.get("year"))
+        parsed_season = self.__to_int(parsed.get("season"))
+        parsed_episode = self.__to_int(parsed.get("episode"))
+
+        if expected_title and parsed_title:
+            if parsed_title == expected_title:
+                score += 48
+            elif expected_title in parsed_title or parsed_title in expected_title:
+                score += 30
+            else:
+                ratio = SequenceMatcher(None, expected_title, parsed_title).ratio()
+                score += int(ratio * 24)
+
+        if expected_type:
+            if parsed_type == expected_type:
+                score += 14
+            elif parsed_type:
+                score -= 12
+
+        if expected_year:
+            if parsed_year == expected_year:
+                score += 12
+            elif parsed_year:
+                score -= 8
+
+        if expected_type == "series":
+            if expected_season:
+                if parsed_season == expected_season:
+                    score += 14
+                elif parsed_season:
+                    score -= 10
+            if expected_episode:
+                if parsed_episode == expected_episode:
+                    score += 28
+                elif parsed_episode:
+                    score -= 20
+
+        return score
+
+    def __should_resolve_target_file(self, target_file: str) -> bool:
+        normalized = self.__normalize_path(target_file)
+        if not normalized:
+            return False
+        if normalized.startswith("/tmp/") or normalized.startswith("/var/tmp/") or normalized.startswith("/dev/shm/"):
+            return True
+        name = Path(target_file).name.lower()
+        if any(flag in name for flag in ("verifynotif", "telegram", "post-update", "webfix", "user-trigger")):
+            return True
+        path = Path(target_file)
+        return not path.exists()
+
     @staticmethod
     def __split_csv(value: Any) -> List[str]:
         return [item.strip() for item in str(value or "").split(",") if item and item.strip()]
@@ -3291,6 +3467,11 @@ class SubtitleAgentBridge(_PluginBase):
         target_file: str = "",
         preferred_languages: Optional[List[str]] = None,
         error_data: Optional[dict] = None,
+        title: str = "",
+        media_type: str = "",
+        year: int = None,
+        season: int = None,
+        episode: int = None,
     ) -> None:
         if not self._notify:
             return
@@ -3314,6 +3495,11 @@ class SubtitleAgentBridge(_PluginBase):
             captcha_payload=captcha_payload,
             media_name=media_name,
             target_file=target_file,
+            title=title,
+            media_type=media_type,
+            year=year,
+            season=season,
+            episode=episode,
         )
 
         text_lines = [f"媒体: {media_name}"]
@@ -3325,18 +3511,16 @@ class SubtitleAgentBridge(_PluginBase):
             title = "Subtitle Agent 需要验证码"
             task_id = str(task_data.get("task_id") or "").strip()
             text_lines.append(f"任务ID: {task_id}")
-            text_lines.append(f"回复: /subcap {task_id} 图中字母")
-            text_lines.append(f"示例: /subcap {task_id} AbCd")
-            text_lines.append(f"刷新: /subcap {task_id} refresh")
-            text_lines.append("注意: 验证失败后会刷新验证码，请仅使用最新一条通知中的验证码图")
-            image_url = str(task_data.get("image_url") or "").strip() or None
             web_url = str(task_data.get("web_url") or "").strip()
             if web_url:
-                text_lines.append(f"网页回填: {web_url}")
+                text_lines.append(f"网页回填(推荐): {web_url}")
+            text_lines.append(f"回复: /subcap {task_id} 图中字母")
+            text_lines.append(f"刷新: /subcap {task_id} refresh")
+            image_url = str(task_data.get("image_url") or "").strip() or None
             if image_url:
                 text_lines.append(f"验证码图: {image_url}")
             else:
-                text_lines.append("验证码图: 当前直链不可用，请打开详情页查看验证码")
+                text_lines.append("验证码图: 直链不可用，请打开详情页")
             detail_url = str(task_data.get("detail_url") or "").strip()
             if detail_url:
                 text_lines.append(f"详情页: {detail_url}")
@@ -3492,6 +3676,11 @@ class SubtitleAgentBridge(_PluginBase):
         error_data: Optional[dict],
         media_name: str,
         target_file: str,
+        title: str = "",
+        media_type: str = "",
+        year: int = None,
+        season: int = None,
+        episode: int = None,
     ) -> Optional[dict]:
         captcha_payload = self.__extract_captcha_payload(error_data)
         if not captcha_payload:
@@ -3500,6 +3689,11 @@ class SubtitleAgentBridge(_PluginBase):
             captcha_payload=captcha_payload,
             media_name=media_name,
             target_file=target_file,
+            title=title,
+            media_type=media_type,
+            year=year,
+            season=season,
+            episode=episode,
         )
         if not task_data:
             return None
@@ -3518,6 +3712,11 @@ class SubtitleAgentBridge(_PluginBase):
         captcha_payload: Optional[dict],
         media_name: str,
         target_file: str,
+        title: str = "",
+        media_type: str = "",
+        year: int = None,
+        season: int = None,
+        episode: int = None,
     ) -> Optional[dict]:
         if not isinstance(captcha_payload, dict):
             return None
@@ -3531,6 +3730,11 @@ class SubtitleAgentBridge(_PluginBase):
             if str(task.get("challenge_id") or "").strip() == challenge_id:
                 task["media_name"] = media_name
                 task["target_file"] = target_file
+                task["title"] = str(title or task.get("title") or "").strip()
+                task["media_type"] = self.__normalize_media_type(media_type) or str(task.get("media_type") or "").strip()
+                task["year"] = self.__to_int(year) or self.__to_int(task.get("year"))
+                task["season"] = self.__to_int(season) or self.__to_int(task.get("season"))
+                task["episode"] = self.__to_int(episode) or self.__to_int(task.get("episode"))
                 detail_url = str(captcha_payload.get("detail_url") or "").strip()
                 if detail_url:
                     task["detail_url"] = detail_url
@@ -3560,6 +3764,11 @@ class SubtitleAgentBridge(_PluginBase):
             "challenge_id": challenge_id,
             "media_name": media_name,
             "target_file": target_file,
+            "title": str(title or "").strip(),
+            "media_type": self.__normalize_media_type(media_type),
+            "year": self.__to_int(year),
+            "season": self.__to_int(season),
+            "episode": self.__to_int(episode),
             "provider": str(captcha_payload.get("provider") or "").strip(),
             "subtitle_id": str(captcha_payload.get("subtitle_id") or "").strip(),
             "image_path": image_path,
@@ -3894,6 +4103,11 @@ class SubtitleAgentBridge(_PluginBase):
                     error_data=error_data,
                     media_name=str(task.get("media_name") or "未知媒体"),
                     target_file=str(task.get("target_file") or ""),
+                    title=str(task.get("title") or ""),
+                    media_type=str(task.get("media_type") or ""),
+                    year=self.__to_int(task.get("year")),
+                    season=self.__to_int(task.get("season")),
+                    episode=self.__to_int(task.get("episode")),
                 ),
             )
             if message_context:
@@ -3925,7 +4139,18 @@ class SubtitleAgentBridge(_PluginBase):
                 )
             return response
 
-        target_file = str(task.get("target_file") or "").strip()
+        target_file = self.__resolve_target_file_for_write(
+            target_file=str(task.get("target_file") or "").strip(),
+            title=str(task.get("title") or ""),
+            media_type=str(task.get("media_type") or ""),
+            year=self.__to_int(task.get("year")),
+            season=self.__to_int(task.get("season")),
+            episode=self.__to_int(task.get("episode")),
+        )
+        if target_file:
+            task["target_file"] = target_file
+            tasks[normalized_task_id] = task
+            self.__save_captcha_tasks(tasks)
         if not target_file:
             tasks.pop(normalized_task_id, None)
             self.__save_captcha_tasks(tasks)
@@ -4006,6 +4231,11 @@ class SubtitleAgentBridge(_PluginBase):
                 error_data=error_data,
                 media_name=str(task.get("media_name") or "未知媒体"),
                 target_file=str(task.get("target_file") or ""),
+                title=str(task.get("title") or ""),
+                media_type=str(task.get("media_type") or ""),
+                year=self.__to_int(task.get("year")),
+                season=self.__to_int(task.get("season")),
+                episode=self.__to_int(task.get("episode")),
             )
             if not isinstance(data, dict):
                 data = self.__captcha_task_view_data(
@@ -4231,7 +4461,7 @@ class SubtitleAgentBridge(_PluginBase):
         value = str(path or "").strip()
         if value.startswith("http://") or value.startswith("https://"):
             return value
-        base = str(self._web_base_url or "").strip()
+        base = str(self._web_base_url or self._runtime_web_base_url or "").strip()
         if not base:
             return value
         return urljoin(f"{base}/", value.lstrip("/"))
@@ -4241,3 +4471,19 @@ class SubtitleAgentBridge(_PluginBase):
         if not token:
             return "/api/v1/plugin/SubtitleAgentBridge/captcha_web"
         return f"/api/v1/plugin/SubtitleAgentBridge/captcha_web?token={token}&apikey={settings.API_TOKEN}"
+
+    def __remember_web_base_url(self, request: Optional[FastAPIRequest]) -> None:
+        if self._web_base_url:
+            return
+        if request is None:
+            return
+        try:
+            host = str((request.headers or {}).get("host") or "").strip()
+            if not host:
+                return
+            scheme = str(getattr(request.url, "scheme", "") or "").strip() or "http"
+            runtime = self.__normalize_host(f"{scheme}://{host}")
+            if runtime:
+                self._runtime_web_base_url = runtime
+        except Exception:
+            return
