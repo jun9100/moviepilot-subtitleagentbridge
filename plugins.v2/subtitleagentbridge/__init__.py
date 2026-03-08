@@ -29,7 +29,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.41"
+    plugin_version = "0.5.42"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -3236,6 +3236,7 @@ class SubtitleAgentBridge(_PluginBase):
             text_lines.append(f"任务ID: {task_id}")
             text_lines.append(f"回复: /subcap {task_id} 图中字母")
             text_lines.append(f"示例: /subcap {task_id} AbCd")
+            text_lines.append("注意: 验证失败后会刷新验证码，请仅使用最新一条通知中的验证码图")
             image_url = str(task_data.get("image_url") or "").strip() or None
             if image_url:
                 text_lines.append(f"验证码图: {image_url}")
@@ -3636,7 +3637,11 @@ class SubtitleAgentBridge(_PluginBase):
                 if isinstance(response.data, dict):
                     image_url = str(response.data.get("image_url") or "").strip()
                     detail_url = str(response.data.get("detail_url") or "").strip()
-                retry_lines = [failure_message, f"请重新回复：/subcap {normalized_task_id} 新验证码"]
+                retry_lines = [
+                    failure_message,
+                    f"请重新回复：/subcap {normalized_task_id} 新验证码",
+                    "注意: 旧验证码会失效，请按本条消息中的最新验证码图回复",
+                ]
                 if image_url:
                     retry_lines.append(f"验证码图：{image_url}")
                 if detail_url:
