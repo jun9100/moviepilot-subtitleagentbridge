@@ -28,7 +28,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.37"
+    plugin_version = "0.5.38"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -3561,11 +3561,18 @@ class SubtitleAgentBridge(_PluginBase):
             )
             if message_context:
                 image_url = ""
+                detail_url = ""
                 if isinstance(response.data, dict):
                     image_url = str(response.data.get("image_url") or "").strip()
+                    detail_url = str(response.data.get("detail_url") or "").strip()
+                retry_lines = [failure_message, f"请重新回复：/subcap {normalized_task_id} 新验证码"]
+                if image_url:
+                    retry_lines.append(f"验证码图：{image_url}")
+                if detail_url:
+                    retry_lines.append(f"详情页：{detail_url}")
                 self.__post_message_to_context(
                     title="Subtitle Agent 验证码失败",
-                    text=f"{failure_message}\n请重新回复：subcap {normalized_task_id} 新验证码",
+                    text="\n".join(retry_lines),
                     message_context=message_context,
                     image=image_url or None,
                 )
