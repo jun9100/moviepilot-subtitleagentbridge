@@ -3411,7 +3411,7 @@ class SubtitleAgentBridge(_PluginBase):
         code: str,
         message_context: Optional[Dict[str, Any]] = None,
     ) -> schemas.Response:
-        normalized_task_id = str(task_id or "").strip()
+        normalized_task_id = str(task_id or "").strip().lower()
         normalized_code = str(code or "").strip()
         if not normalized_task_id or not normalized_code:
             response = schemas.Response(success=False, message="缺少 task_id 或 code")
@@ -3619,7 +3619,7 @@ class SubtitleAgentBridge(_PluginBase):
         matched = re.match(r"^\s*/?subcap(?:tcha)?\s+([A-Za-z0-9]{4,32})\s+([A-Za-z0-9]{3,16})\s*$", text, re.I)
         if not matched:
             return None
-        return matched.group(1), matched.group(2)
+        return matched.group(1).lower(), matched.group(2)
 
     def __post_message_to_context(
         self,
