@@ -1262,21 +1262,33 @@ class SubtitleAgentBridge(_PluginBase):
 
             if self._notify:
                 notice_title = "Subtitle Agent 异步任务成功" if response.success else "Subtitle Agent 异步任务失败"
-                lines = [f"任务ID: {job_id}", f"媒体: {media_name}", f"结果: {response.message}"]
+                lines = [f"任务ID: {job_id}", f"媒体: {media_name}"]
+                notice_image = None
                 if isinstance(response.data, dict):
                     output_path = str(response.data.get("path") or "").strip()
                     if output_path:
                         lines.append(f"字幕: {output_path}")
                     captcha_task_id = str(response.data.get("captcha_task_id") or "").strip()
+                    detail_url = str(response.data.get("detail_url") or "").strip()
+                    image_url = str(response.data.get("image_url") or "").strip()
                     if captcha_task_id:
+                        lines.append("结果: 需要验证码")
                         lines.append(f"验证码任务: {captcha_task_id}")
+                        if detail_url:
+                            lines.append(f"详情页: {detail_url}")
+                        if image_url:
+                            lines.append(f"验证码图: {image_url}")
+                            notice_image = image_url
                     reply_format = str(response.data.get("reply_format") or "").strip()
                     if reply_format:
                         lines.append(f"回复: {reply_format}")
+                if len(lines) == 2:
+                    lines.append(f"结果: {response.message}")
                 self.post_message(
                     mtype=NotificationType.Plugin,
                     title=notice_title,
                     text="\n".join(lines),
+                    image=notice_image,
                 )
         except Exception as err:
             message = f"异步任务异常: {str(err)}"
@@ -3106,6 +3118,8 @@ class SubtitleAgentBridge(_PluginBase):
             text_lines.append(f"回复: subcap {task_id} 图中字母")
             text_lines.append(f"示例: subcap {task_id} AbCd")
             image_url = str(task_data.get("image_url") or "").strip() or None
+            if image_url:
+                text_lines.append(f"验证码图: {image_url}")
             detail_url = str(task_data.get("detail_url") or "").strip()
             if detail_url:
                 text_lines.append(f"详情页: {detail_url}")
