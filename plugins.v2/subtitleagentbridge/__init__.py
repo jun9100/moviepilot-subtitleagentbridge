@@ -28,7 +28,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.32"
+    plugin_version = "0.5.33"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -855,6 +855,13 @@ class SubtitleAgentBridge(_PluginBase):
                     self.__post_message_to_context(
                         title="Subtitle Agent 任务状态",
                         text=self.__render_manual_job_status(job_id=job_id),
+                        message_context=self.__extract_message_context(event_data),
+                    )
+                    return
+                if re.match(r"^\s*/?subcap(?:tcha)?\b", text, re.IGNORECASE):
+                    self.__post_message_to_context(
+                        title="Subtitle Agent 验证码格式错误",
+                        text="请发送: subcap 任务ID 图中字母\n示例: subcap 91e65710 AbCd",
                         message_context=self.__extract_message_context(event_data),
                     )
                     return
@@ -3096,9 +3103,12 @@ class SubtitleAgentBridge(_PluginBase):
             title = "Subtitle Agent 需要验证码"
             task_id = str(task_data.get("task_id") or "").strip()
             text_lines.append(f"任务ID: {task_id}")
-            text_lines.append(f"回复: subcap {task_id} 验证码")
+            text_lines.append(f"回复: subcap {task_id} 图中字母")
             text_lines.append(f"示例: subcap {task_id} AbCd")
             image_url = str(task_data.get("image_url") or "").strip() or None
+            detail_url = str(task_data.get("detail_url") or "").strip()
+            if detail_url:
+                text_lines.append(f"详情页: {detail_url}")
 
         text_lines.append("推荐下载：")
         for index, item in enumerate(picked_items, 1):
@@ -3213,7 +3223,8 @@ class SubtitleAgentBridge(_PluginBase):
             "captcha_task_id": task_data.get("task_id"),
             "challenge_id": task_data.get("challenge_id"),
             "image_url": task_data.get("image_url"),
-            "reply_format": f"subcap {task_data.get('task_id')} 验证码",
+            "detail_url": task_data.get("detail_url"),
+            "reply_format": f"subcap {task_data.get('task_id')} 图中字母",
         }
 
     def __create_captcha_task(
@@ -3235,6 +3246,9 @@ class SubtitleAgentBridge(_PluginBase):
             if str(task.get("challenge_id") or "").strip() == challenge_id:
                 task["media_name"] = media_name
                 task["target_file"] = target_file
+                detail_url = str(captcha_payload.get("detail_url") or "").strip()
+                if detail_url:
+                    task["detail_url"] = detail_url
                 task["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 self.__save_captcha_tasks(tasks)
                 task["task_id"] = task_id
@@ -3250,6 +3264,7 @@ class SubtitleAgentBridge(_PluginBase):
             "provider": str(captcha_payload.get("provider") or "").strip(),
             "subtitle_id": str(captcha_payload.get("subtitle_id") or "").strip(),
             "image_path": image_path,
+            "detail_url": str(captcha_payload.get("detail_url") or "").strip(),
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }

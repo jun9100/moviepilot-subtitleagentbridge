@@ -175,6 +175,7 @@ curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/backfil
 
 ## 版本说明（近期）
 
+- `v0.5.33`：优化验证码人工辅助交互：`subcap` 参数错误时主动返回格式提示；通知新增验证码详情页链接；回复文案改为“图中字母”避免误填占位词。
 - `v0.5.32`：新增异步手动下载任务（`download_subtitle_async`/`job_status`）和状态通知接口（`notify_status`），避免长耗时触发接口超时，便于通过 MoviePilot/Telegram 跟踪进度。
 - `v0.5.31`：新增 SubHD 字母验证码任务链路：通知推送验证码图片、支持回复 `subcap 任务ID 验证码` 继续下载；同时将手动下载通知精简为 2 个推荐候选。
 - `v0.5.30`：补字幕结果通知新增成功明细（文件名、字幕名、来源），并将最近成功详情写入插件数据页便于复核。
