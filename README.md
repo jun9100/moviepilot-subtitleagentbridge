@@ -65,7 +65,11 @@
 ## 插件 API
 
 - `/api/v1/plugin/SubtitleAgentBridge/download_subtitle`
+- `/api/v1/plugin/SubtitleAgentBridge/download_subtitle_async`
+- `/api/v1/plugin/SubtitleAgentBridge/job_status`
+- `/api/v1/plugin/SubtitleAgentBridge/notify_status`
 - `/api/v1/plugin/SubtitleAgentBridge/backfill_directory`
+- `/api/v1/plugin/SubtitleAgentBridge/submit_captcha`
 
 必填参数：
 
@@ -84,6 +88,73 @@ curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/downloa
   --data-urlencode "languages=zh-cn,zh-tw" \
   --data-urlencode "target_file=/tmp/KontoGaHajimaru.S01E01.mkv"
 ```
+
+## 异步触发示例（推荐）
+
+适合网络慢或站点响应慢场景，接口会立即返回 `job_id`，避免客户端超时：
+
+```bash
+curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/download_subtitle_async" \
+  --data-urlencode "apikey=<API_TOKEN>" \
+  --data-urlencode "title=コントが始まる" \
+  --data-urlencode "media_type=tv" \
+  --data-urlencode "year=2021" \
+  --data-urlencode "season=1" \
+  --data-urlencode "episode=3" \
+  --data-urlencode "languages=zh-cn,zh-tw" \
+  --data-urlencode "target_file=/tmp/KontoGaHajimaru.S01E03.mkv"
+```
+
+查询任务状态：
+
+```bash
+curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/job_status" \
+  --data-urlencode "apikey=<API_TOKEN>" \
+  --data-urlencode "job_id=<JOB_ID>"
+```
+
+主动发送进度通知：
+
+```bash
+curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/notify_status" \
+  --data-urlencode "apikey=<API_TOKEN>" \
+  --data-urlencode "title=Subtitle Agent 进度" \
+  --data-urlencode "text=当前正在扫描并测试验证码链路"
+```
+
+## 字母验证码接力
+
+当 `subhd/subhdtw` 下载阶段遇到字母验证码时，插件会：
+
+1. 通过 MoviePilot 通知推送验证码图片。
+2. 给出一个短任务 ID，例如 `a1b2c3d4`。
+3. 用户通过 Telegram / 企业微信等回复：
+
+```text
+subcap a1b2c3d4 RhmE
+```
+
+插件收到后会继续调用 Subtitle Agent 完成验证码提交与字幕下载。
+
+Telegram 侧可用命令：
+
+- `subcap 任务ID 验证码`
+- `substatus [任务ID]`
+
+也可以直接走插件接口：
+
+```bash
+curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/submit_captcha" \
+  --data-urlencode "apikey=<API_TOKEN>" \
+  --data-urlencode "task_id=<TASK_ID>" \
+  --data-urlencode "code=<CAPTCHA_CODE>"
+```
+
+## 手动通知策略
+
+- 自动下载失败时，通知内容默认只保留 2 个推荐候选。
+- 不再附带长篇原因和建议，减少消息噪音。
+- 若是验证码场景，优先推送验证码图片与任务 ID，而不是一长串候选解释。
 
 ## 已入库批量补字幕示例
 
@@ -104,15 +175,26 @@ curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/backfil
 
 ## 版本说明（近期）
 
+- `v0.5.32`：新增异步手动下载任务（`download_subtitle_async`/`job_status`）和状态通知接口（`notify_status`），避免长耗时触发接口超时，便于通过 MoviePilot/Telegram 跟踪进度。
+- `v0.5.31`：新增 SubHD 字母验证码任务链路：通知推送验证码图片、支持回复 `subcap 任务ID 验证码` 继续下载；同时将手动下载通知精简为 2 个推荐候选。
 - `v0.5.30`：补字幕结果通知新增成功明细（文件名、字幕名、来源），并将最近成功详情写入插件数据页便于复核。
-- `v0.5.8`：优化定时计划配置交互（模式改为下拉选择），并补充小白友好说明，减少误配置。
-- `v0.5.7`：定期任务支持每天固定时间执行（`daily HH:MM`），手动通知新增“复制全部链接”区块，便于一键复制。
-- `v0.5.6`：新增定期自动补字幕任务（面向已入库缺字幕文件），并在手动下载通知中增加“推荐优先下载项”。
-- `v0.5.5`：只要存在候选但自动下载失败（不限验证码场景），统一通过 MoviePilot 通知推送候选链接供手动下载。
-- `v0.5.4`：当候选字幕因验证码等原因无法自动下载时，自动通过 MoviePilot 通知推送候选下载链接供手动处理。
-- `v0.5.3`：适配 Subtitle Agent `v0.1.5` 多源分层检索（`assrt/subhd -> podnapisi/tvsubtitles -> opensubtitles`）。
-- `v0.5.2`：新增自动字幕时间轴校正（参考同目录已有字幕，自动判断并平移）。
-- `v0.5.1`：新增标题别名映射（`title_aliases`）与泛化标题过滤，降低剧集误匹配字幕风险。
-- `v0.5.0`：新增仅扫描目录白名单（`include_paths`）与默认 `downloads` 排除，避免字幕写入未整理目录。
-- `v0.4.0`：支持排除目录和关键词。
-- `v0.3.x`：支持目录回填、关键词过滤和标题回退搜索。
+- `v0.5.29`：优化日番同季内封字幕推断阈值，提高烧录字幕场景的漏判覆盖率。
+- `v0.5.28`：新增日番同季内封字幕推断：当同季多数样本识别为内封字幕时，自动跳过该季其余漏判集。
+- `v0.5.27`：新增中文纪录片自动跳过规则（`/tv/纪录片` + CJK 片名推断），减少中文纪录片误报缺字幕。
+- `v0.5.26`：目录补字幕 API 新增 `detail_limit` 与 `scanned` 字段，支持更完整的 `dry_run` 审计输出。
+- `v0.5.25`：修复 Season 与 CJK 正则转义错误，恢复未分类中文剧集兜底识别，减少国产剧误报缺字幕。
+- `v0.5.24`：新增未分类中文剧集兜底跳过规则：仅对 `/tv/剧名/Season` 结构且无外语目录标记的中文剧生效。
+- `v0.5.23`：新增 NFO 兜底识别中文内容：按国家/原始语言自动跳过中文音轨媒体，减少无效补字幕任务。
+- `v0.5.22`：强化剧集字幕识别：新增 `SxxEyy` 同集精确匹配，避免跨集字幕被误判为已覆盖。
+- `v0.5.21`：`dry_run` 返回 `missing_files` 数量上限提升，便于完整排查误报。
+- `v0.5.20`：新增 `debug_subtitle_presence` 调试接口，并进一步加固电影目录共享字幕判定。
+- `v0.5.19`：增强电影目录字幕复用判定：同目录多分辨率视频可复用同片名字幕，减少误报缺字幕。
+- `v0.5.18`：修复同目录字幕识别：忽略 `chi/zh-cn` 等语言后缀后再做同片名匹配，避免误报缺字幕。
+- `v0.5.17`：新增“手动跳过媒体关键词”配置，可按片名/路径关键词显式跳过硬字幕或不需补字幕的媒体。
+- `v0.5.16`：`dry_run` 返回新增 `skipped_files`（含跳过原因），便于定位“为什么被跳过/未跳过”。
+- `v0.5.15`：补充外挂字幕存在判定：同目录同片名（忽略分辨率/年份差异）的字幕文件也视为已覆盖，避免误判缺字幕。
+- `v0.5.14`：进一步增强内封字幕识别：在命令行探测外新增文件签名兜底，修复个别媒体流信息缺失导致的漏判。
+- `v0.5.13`：修复跳过判定：增强国产/华语目录识别；新增 `ffprobe/mediainfo/ffmpeg + 文件签名` 多后端探测内封字幕与中文音轨。
+- `v0.5.12`：扫描/入库补字幕新增智能跳过：国产/华语目录、内封字幕媒体、含中文音轨媒体默认不下载字幕。
+- `v0.5.11`：目录补字幕接口新增 `dry_run` 参数：只扫描缺字幕文件不触发下载，快速输出缺字幕清单，便于先盘点再测试。
+- `v0.5.0` - `v0.5.10`：完成目录回填、自动校时、定时补字幕、手动下载通知、多标题回退搜索与路径排除等基础能力建设。

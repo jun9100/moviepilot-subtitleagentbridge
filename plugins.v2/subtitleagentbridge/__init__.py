@@ -5,8 +5,9 @@ import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
-from urllib.parse import quote, urljoin
+from urllib.parse import urljoin
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 from app import schemas
 from app.core.config import settings
@@ -15,6 +16,8 @@ from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType
 from app.schemas.types import EventType, MediaType
+
+_USER_MESSAGE_EVENT = getattr(EventType, "UserMessage", None)
 
 
 class SubtitleAgentBridge(_PluginBase):
@@ -25,7 +28,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.30"
+    plugin_version = "0.5.32"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -57,12 +60,15 @@ class SubtitleAgentBridge(_PluginBase):
     _periodic_thread: Optional[threading.Thread] = None
     _periodic_stop_event: Optional[threading.Event] = None
     _periodic_run_lock = threading.Lock()
+    _manual_job_lock = threading.Lock()
     _media_probe_cache: Dict[str, Dict[str, Any]] = {}
     _nfo_chinese_cache: Dict[str, bool] = {}
     _season_embedded_hint_cache: Dict[str, bool] = {}
     _dry_run_detail_limit: int = 500
     _auto_skip_cjk_documentary: bool = True
     _notify_success_detail_limit: int = 5
+    _captcha_task_ttl_hours: int = 6
+    _manual_job_ttl_hours: int = 24
 
     _subtitle_suffixes = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
     _chinese_audio_lang_aliases = {
@@ -210,6 +216,8 @@ class SubtitleAgentBridge(_PluginBase):
         self._media_probe_cache = {}
         self._nfo_chinese_cache = {}
         self._season_embedded_hint_cache = {}
+        self.__cleanup_captcha_tasks()
+        self.__cleanup_manual_jobs()
         self.__start_periodic_worker()
 
     def get_state(self) -> bool:
@@ -227,6 +235,34 @@ class SubtitleAgentBridge(_PluginBase):
                 "methods": ["GET"],
                 "summary": "手动下载字幕",
                 "description": "按标题信息调用 Subtitle Agent 搜索并下载字幕。",
+            },
+            {
+                "path": "/download_subtitle_async",
+                "endpoint": self.download_subtitle_async,
+                "methods": ["GET"],
+                "summary": "异步下载字幕",
+                "description": "异步触发字幕搜索下载任务，立即返回任务ID，避免长耗时请求超时。",
+            },
+            {
+                "path": "/job_status",
+                "endpoint": self.job_status,
+                "methods": ["GET"],
+                "summary": "查看任务状态",
+                "description": "查询异步字幕任务的执行状态和结果。",
+            },
+            {
+                "path": "/notify_status",
+                "endpoint": self.notify_status,
+                "methods": ["GET"],
+                "summary": "发送状态通知",
+                "description": "通过 MoviePilot 通知渠道推送进度或结果消息。",
+            },
+            {
+                "path": "/submit_captcha",
+                "endpoint": self.submit_captcha,
+                "methods": ["GET"],
+                "summary": "提交字幕验证码",
+                "description": "为待处理的 SubHD 验证码任务提交验证码并继续下载字幕。",
             },
             {
                 "path": "/backfill_directory",
@@ -800,6 +836,45 @@ class SubtitleAgentBridge(_PluginBase):
         finally:
             self._periodic_run_lock.release()
 
+    if _USER_MESSAGE_EVENT is not None:
+        @eventmanager.register(_USER_MESSAGE_EVENT)
+        def handle_user_message(self, event: Event):
+            if not self._enabled or not self._host:
+                return
+
+            event_data = event.event_data or {}
+            text = self.__extract_user_message_text(event_data)
+            if not text:
+                return
+
+            parsed = self.__parse_captcha_reply(text)
+            if parsed is None:
+                if re.match(r"^\s*/?substatus(?:\s+[A-Za-z0-9]{4,32})?\s*$", text, re.IGNORECASE):
+                    job_id_match = re.match(r"^\s*/?substatus(?:\s+([A-Za-z0-9]{4,32}))?\s*$", text, re.IGNORECASE)
+                    job_id = job_id_match.group(1) if job_id_match else ""
+                    self.__post_message_to_context(
+                        title="Subtitle Agent 任务状态",
+                        text=self.__render_manual_job_status(job_id=job_id),
+                        message_context=self.__extract_message_context(event_data),
+                    )
+                    return
+                if re.match(r"^\s*/?subhelp\s*$", text, re.IGNORECASE) or re.match(
+                    r"^\s*/?subcap(?:tcha)?\s*$", text, re.IGNORECASE
+                ):
+                    self.__post_message_to_context(
+                        title="Subtitle Agent 验证码帮助",
+                        text="可用命令：\n1) subcap 任务ID 验证码\n2) substatus [任务ID]",
+                        message_context=self.__extract_message_context(event_data),
+                    )
+                return
+
+            task_id, code = parsed
+            self.__submit_captcha_task(
+                task_id=task_id,
+                code=code,
+                message_context=self.__extract_message_context(event_data),
+            )
+
     @eventmanager.register(EventType.TransferComplete)
     def download_on_transfer_complete(self, event: Event):
         if not self._enabled:
@@ -929,7 +1004,7 @@ class SubtitleAgentBridge(_PluginBase):
             items,
             preferred_languages=self.__split_languages(languages or self._languages),
         )
-        content, subtitle_format, message = self.__download_item(selected)
+        content, subtitle_format, message, error_data = self.__download_item(selected)
         if not content:
             failure_message = self.__normalize_failure_message(message, "下载字幕失败")
             self.__maybe_notify_manual_download(
@@ -944,8 +1019,20 @@ class SubtitleAgentBridge(_PluginBase):
                 items=items,
                 target_file=target_file,
                 preferred_languages=self.__split_languages(languages or self._languages),
+                error_data=error_data,
             )
-            return schemas.Response(success=False, message=failure_message)
+            response_data = self.__captcha_task_response_data(
+                error_data=error_data,
+                media_name=self.__format_media_name(
+                    title=title,
+                    media_type=media_type,
+                    year=year,
+                    season=season,
+                    episode=episode,
+                ),
+                target_file=target_file,
+            )
+            return schemas.Response(success=False, message=failure_message, data=response_data)
 
         if not target_file:
             return schemas.Response(
@@ -988,6 +1075,217 @@ class SubtitleAgentBridge(_PluginBase):
                 "sync": sync_note,
             },
         )
+
+    def download_subtitle_async(
+        self,
+        title: str,
+        apikey: str,
+        media_type: str = "movie",
+        year: int = None,
+        season: int = None,
+        episode: int = None,
+        target_file: str = "",
+        languages: str = "",
+    ) -> schemas.Response:
+        if apikey != settings.API_TOKEN:
+            return schemas.Response(success=False, message="API密钥错误")
+
+        media_name = self.__format_media_name(
+            title=title,
+            media_type=media_type,
+            year=year,
+            season=season,
+            episode=episode,
+        )
+        job_id = uuid4().hex[:8]
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        job_payload = {
+            "job_id": job_id,
+            "status": "queued",
+            "title": title,
+            "media_type": media_type,
+            "year": year,
+            "season": season,
+            "episode": episode,
+            "target_file": target_file,
+            "languages": languages or self._languages,
+            "media_name": media_name,
+            "message": "任务排队中",
+            "created_at": now_text,
+            "updated_at": now_text,
+        }
+        self.__save_manual_job(job_id=job_id, payload=job_payload)
+
+        worker = threading.Thread(
+            target=self.__run_manual_download_job,
+            kwargs={
+                "job_id": job_id,
+                "title": title,
+                "media_type": media_type,
+                "year": year,
+                "season": season,
+                "episode": episode,
+                "target_file": target_file,
+                "languages": languages or self._languages,
+                "media_name": media_name,
+            },
+            daemon=True,
+            name=f"subtitleagentbridge-manual-{job_id}",
+        )
+        worker.start()
+
+        if self._notify:
+            self.post_message(
+                mtype=NotificationType.Plugin,
+                title="Subtitle Agent 异步任务已提交",
+                text=f"任务ID: {job_id}\n媒体: {media_name}",
+            )
+
+        return schemas.Response(
+            success=True,
+            message=f"任务已提交: {job_id}",
+            data={
+                "job_id": job_id,
+                "status": "queued",
+                "media_name": media_name,
+            },
+        )
+
+    def job_status(self, apikey: str, job_id: str = "") -> schemas.Response:
+        if apikey != settings.API_TOKEN:
+            return schemas.Response(success=False, message="API密钥错误")
+
+        self.__cleanup_manual_jobs()
+        jobs = self.__load_manual_jobs()
+        normalized_job_id = str(job_id or "").strip()
+        if normalized_job_id:
+            payload = jobs.get(normalized_job_id)
+            if not isinstance(payload, dict):
+                return schemas.Response(success=False, message="任务不存在或已过期")
+            return schemas.Response(success=True, message="ok", data=payload)
+
+        entries = list(jobs.values())
+        entries.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        return schemas.Response(success=True, message="ok", data={"total": len(entries), "jobs": entries[:30]})
+
+    def notify_status(self, apikey: str, text: str, title: str = "Subtitle Agent 状态") -> schemas.Response:
+        if apikey != settings.API_TOKEN:
+            return schemas.Response(success=False, message="API密钥错误")
+
+        body = str(text or "").strip()
+        if not body:
+            return schemas.Response(success=False, message="text 不能为空")
+
+        msg_title = str(title or "").strip() or "Subtitle Agent 状态"
+        self.post_message(
+            mtype=NotificationType.Plugin,
+            title=msg_title,
+            text=body,
+        )
+        return schemas.Response(success=True, message="通知已发送")
+
+    def __render_manual_job_status(self, job_id: str = "") -> str:
+        self.__cleanup_manual_jobs()
+        jobs = self.__load_manual_jobs()
+        normalized = str(job_id or "").strip()
+        if normalized:
+            job = jobs.get(normalized)
+            if not isinstance(job, dict):
+                return "任务不存在或已过期"
+            return "\n".join(
+                [
+                    f"任务ID: {normalized}",
+                    f"状态: {job.get('status')}",
+                    f"媒体: {job.get('media_name') or job.get('title') or '未知媒体'}",
+                    f"更新时间: {job.get('updated_at')}",
+                    f"结果: {job.get('message') or ''}",
+                ]
+            )
+
+        if not jobs:
+            return "当前没有可查询任务"
+
+        items = list(jobs.values())
+        items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        lines = ["最近任务："]
+        for item in items[:5]:
+            lines.append(
+                f"{item.get('job_id')} | {item.get('status')} | "
+                f"{item.get('media_name') or item.get('title') or '未知媒体'} | "
+                f"{item.get('updated_at')}"
+            )
+        return "\n".join(lines)
+
+    def __run_manual_download_job(
+        self,
+        *,
+        job_id: str,
+        title: str,
+        media_type: str,
+        year: int,
+        season: int,
+        episode: int,
+        target_file: str,
+        languages: str,
+        media_name: str,
+    ) -> None:
+        self.__update_manual_job(
+            job_id=job_id,
+            status="running",
+            message="任务执行中",
+        )
+        try:
+            response = self.download_subtitle(
+                title=title,
+                apikey=settings.API_TOKEN,
+                media_type=media_type,
+                year=year,
+                season=season,
+                episode=episode,
+                target_file=target_file,
+                languages=languages,
+            )
+            status = "success" if response.success else "failed"
+            self.__update_manual_job(
+                job_id=job_id,
+                status=status,
+                message=response.message,
+                result_data=response.data if isinstance(response.data, dict) else {},
+            )
+
+            if self._notify:
+                notice_title = "Subtitle Agent 异步任务成功" if response.success else "Subtitle Agent 异步任务失败"
+                lines = [f"任务ID: {job_id}", f"媒体: {media_name}", f"结果: {response.message}"]
+                if isinstance(response.data, dict):
+                    output_path = str(response.data.get("path") or "").strip()
+                    if output_path:
+                        lines.append(f"字幕: {output_path}")
+                    captcha_task_id = str(response.data.get("captcha_task_id") or "").strip()
+                    if captcha_task_id:
+                        lines.append(f"验证码任务: {captcha_task_id}")
+                    reply_format = str(response.data.get("reply_format") or "").strip()
+                    if reply_format:
+                        lines.append(f"回复: {reply_format}")
+                self.post_message(
+                    mtype=NotificationType.Plugin,
+                    title=notice_title,
+                    text="\n".join(lines),
+                )
+        except Exception as err:
+            message = f"异步任务异常: {str(err)}"
+            self.__update_manual_job(job_id=job_id, status="failed", message=message)
+            logger.error(f"[SubtitleAgentBridge] {message}")
+            if self._notify:
+                self.post_message(
+                    mtype=NotificationType.Plugin,
+                    title="Subtitle Agent 异步任务异常",
+                    text=f"任务ID: {job_id}\n媒体: {media_name}\n{message}",
+                )
+
+    def submit_captcha(self, apikey: str, task_id: str, code: str) -> schemas.Response:
+        if apikey != settings.API_TOKEN:
+            return schemas.Response(success=False, message="API密钥错误")
+        return self.__submit_captcha_task(task_id=task_id, code=code)
 
     def backfill_directory(
         self,
@@ -1159,7 +1457,7 @@ class SubtitleAgentBridge(_PluginBase):
                         continue
 
                     selected = self.__pick_item(items, preferred_languages=preferred_languages)
-                    content, subtitle_format, message = self.__download_item(selected)
+                    content, subtitle_format, message, error_data = self.__download_item(selected)
                     if not content:
                         failure_message = self.__normalize_failure_message(message, "下载字幕失败")
                         self.__maybe_notify_manual_download(
@@ -1174,6 +1472,7 @@ class SubtitleAgentBridge(_PluginBase):
                             items=items,
                             target_file=str(video_file),
                             preferred_languages=preferred_languages,
+                            error_data=error_data,
                         )
                         failed += 1
                         errors.append(
@@ -1375,7 +1674,7 @@ class SubtitleAgentBridge(_PluginBase):
             return False, self.__normalize_failure_message(message, "未找到字幕")
 
         selected = self.__pick_item(items)
-        content, subtitle_format, message = self.__download_item(selected)
+        content, subtitle_format, message, error_data = self.__download_item(selected)
         if not content:
             failure_message = self.__normalize_failure_message(message, "下载失败")
             self.__maybe_notify_manual_download(
@@ -1390,6 +1689,7 @@ class SubtitleAgentBridge(_PluginBase):
                 items=items,
                 target_file=media_file,
                 preferred_languages=self.__split_languages(self._languages),
+                error_data=error_data,
             )
             return False, failure_message
 
@@ -1490,10 +1790,10 @@ class SubtitleAgentBridge(_PluginBase):
                     return item
         return items[0]
 
-    def __download_item(self, item: dict) -> Tuple[Optional[bytes], str, Optional[str]]:
+    def __download_item(self, item: dict) -> Tuple[Optional[bytes], str, Optional[str], Optional[dict]]:
         download_url = item.get("download_url")
         if not download_url:
-            return None, "srt", "候选字幕缺少下载地址"
+            return None, "srt", "候选字幕缺少下载地址", None
 
         full_url = self.__compose_url(download_url)
         try:
@@ -1507,10 +1807,10 @@ class SubtitleAgentBridge(_PluginBase):
                 content_type = str(res.headers.get("Content-Type") or "").lower()
                 content = res.read()
         except Exception as err:
-            return None, "srt", f"请求下载接口失败: {str(err)}"
+            return None, "srt", f"请求下载接口失败: {str(err)}", None
 
         if status_code != 200:
-            return None, "srt", f"下载接口返回错误: {status_code}"
+            return None, "srt", f"下载接口返回错误: {status_code}", None
 
         if "application/json" in content_type:
             try:
@@ -1518,13 +1818,14 @@ class SubtitleAgentBridge(_PluginBase):
             except Exception:
                 body = None
             if isinstance(body, dict) and "success" in body and body.get("success") is not True:
-                return None, "srt", str(body.get("message") or "字幕下载失败")
+                error_data = body.get("data") if isinstance(body.get("data"), dict) else None
+                return None, "srt", str(body.get("message") or "字幕下载失败"), error_data
 
         if not content:
-            return None, "srt", "下载内容为空"
+            return None, "srt", "下载内容为空", None
 
         subtitle_format = str(item.get("format") or item.get("subtitle_format") or "srt").lower()
-        return content, subtitle_format, None
+        return content, subtitle_format, None, None
 
     def __maybe_auto_sync_timing(
         self,
@@ -2760,6 +3061,7 @@ class SubtitleAgentBridge(_PluginBase):
         items: List[dict],
         target_file: str = "",
         preferred_languages: Optional[List[str]] = None,
+        error_data: Optional[dict] = None,
     ) -> None:
         if not self._notify:
             return
@@ -2773,50 +3075,34 @@ class SubtitleAgentBridge(_PluginBase):
             return
         self._manual_notice_cache.add(dedup_key)
 
-        lines: List[str] = []
-        seen_links = set()
-        seen_items = set()
-        copy_links: List[str] = []
-        recommended_entry = ""
         preferred = preferred_languages or self.__split_languages(self._languages)
-        selected = self.__pick_item(items, preferred_languages=preferred)
-        selected_link = str(selected.get("page_link") or "").strip()
-        if not selected_link:
-            raw_download = str(selected.get("download_url") or "").strip()
-            if raw_download:
-                selected_link = self.__compose_url(raw_download)
-        if selected_link:
-            selected_provider = str(selected.get("provider") or "unknown")
-            selected_language = str(selected.get("language") or "und")
-            selected_name = str(
-                selected.get("name")
-                or selected.get("title")
-                or selected.get("subtitle_id")
-                or "字幕候选"
-            )
-            selected_score = self.__to_int(selected.get("score"))
-            score_suffix = f"（score={selected_score}）" if selected_score is not None else ""
-            recommended_entry = f"[{selected_provider}/{selected_language}] {selected_name}{score_suffix}\n{selected_link}"
-            copy_links.append(selected_link)
+        picked_items = self.__pick_manual_notice_items(items, preferred_languages=preferred)
+        if not picked_items:
+            return
 
-        for item in items:
-            dedup_item_key = self.__manual_item_dedup_key(item)
-            if dedup_item_key in seen_items:
-                continue
-            seen_items.add(dedup_item_key)
+        captcha_payload = self.__extract_captcha_payload(error_data)
+        task_data = self.__create_captcha_task(
+            captcha_payload=captcha_payload,
+            media_name=media_name,
+            target_file=target_file,
+        )
 
-            raw_link = str(item.get("page_link") or "").strip()
-            if not raw_link:
-                raw_download = str(item.get("download_url") or "").strip()
-                if raw_download:
-                    raw_link = self.__compose_url(raw_download)
-            if not raw_link:
-                continue
-            if raw_link in seen_links:
-                continue
-            seen_links.add(raw_link)
-            copy_links.append(raw_link)
+        text_lines = [f"媒体: {media_name}"]
+        if target_file:
+            text_lines.append(f"文件: {target_file}")
+        image_url = None
+        title = "Subtitle Agent 需手动下载字幕"
+        if task_data:
+            title = "Subtitle Agent 需要验证码"
+            task_id = str(task_data.get("task_id") or "").strip()
+            text_lines.append(f"任务ID: {task_id}")
+            text_lines.append(f"回复: subcap {task_id} 验证码")
+            text_lines.append(f"示例: subcap {task_id} AbCd")
+            image_url = str(task_data.get("image_url") or "").strip() or None
 
+        text_lines.append("推荐下载：")
+        for index, item in enumerate(picked_items, 1):
+            link = self.__manual_item_link(item)
             provider = str(item.get("provider") or "unknown")
             language = str(item.get("language") or "und")
             subtitle_name = str(
@@ -2825,53 +3111,48 @@ class SubtitleAgentBridge(_PluginBase):
                 or item.get("subtitle_id")
                 or "字幕候选"
             )
-            lines.append(f"[{provider}/{language}] {subtitle_name}\n{raw_link}")
-            if len(lines) >= 5:
-                break
-
-        if not lines:
-            return
-
-        text_lines = [
-            f"媒体: {media_name}",
-            f"原因: {failure_message}",
-        ]
-        failure_kind = self.__classify_manual_failure(failure_message)
-        failure_hint = self.__manual_failure_hint(failure_kind)
-        if failure_hint:
-            text_lines.append(f"建议: {failure_hint}")
-        if target_file:
-            text_lines.append(f"文件: {target_file}")
-        if recommended_entry:
-            text_lines.append("推荐优先下载：")
-            text_lines.append(recommended_entry)
-        text_lines.append("请手动下载以下候选字幕：")
-        for index, entry in enumerate(lines, 1):
-            text_lines.append(f"{index}. {entry}")
-        if copy_links:
-            deduped_copy_links: List[str] = []
-            seen_copy_links = set()
-            for link in copy_links:
-                if link in seen_copy_links:
-                    continue
-                seen_copy_links.add(link)
-                deduped_copy_links.append(link)
-            text_lines.append("复制全部链接：")
-            text_lines.append("\n".join(deduped_copy_links))
-
-        search_keyword = self.__manual_search_keyword(media_name)
-        if search_keyword:
-            encoded = quote(search_keyword)
-            text_lines.append("可补充检索：")
-            text_lines.append(f"SubHD: https://subhd.tv/search/{encoded}")
-            text_lines.append(f"SubHD-TW: https://subhdtw.com/search/{encoded}")
-            text_lines.append(f"Assrt: https://assrt.net/sub/?searchword={encoded}")
+            text_lines.append(f"{index}. [{provider}/{language}] {subtitle_name}")
+            text_lines.append(link)
 
         self.post_message(
             mtype=NotificationType.Plugin,
-            title="Subtitle Agent 需手动下载字幕",
+            title=title,
             text="\n".join(text_lines),
+            image=image_url,
         )
+
+    def __pick_manual_notice_items(
+        self,
+        items: List[dict],
+        *,
+        preferred_languages: Optional[List[str]] = None,
+    ) -> List[dict]:
+        if not items:
+            return []
+
+        preferred = preferred_languages or self.__split_languages(self._languages)
+        ordered: List[dict] = []
+        try:
+            ordered.append(self.__pick_item(items, preferred_languages=preferred))
+        except Exception:
+            pass
+        ordered.extend(items)
+
+        selected: List[dict] = []
+        seen = set()
+        for item in ordered:
+            if not isinstance(item, dict):
+                continue
+            key = self.__manual_item_dedup_key(item)
+            if key in seen:
+                continue
+            if not self.__manual_item_link(item):
+                continue
+            seen.add(key)
+            selected.append(item)
+            if len(selected) >= 2:
+                break
+        return selected
 
     @staticmethod
     def __provider_family(provider: Any) -> str:
@@ -2879,6 +3160,15 @@ class SubtitleAgentBridge(_PluginBase):
         if text in {"subhd", "subhdtw"}:
             return "subhd-family"
         return text or "unknown"
+
+    def __manual_item_link(self, item: dict) -> str:
+        raw_link = str(item.get("page_link") or "").strip()
+        if raw_link:
+            return raw_link
+        raw_download = str(item.get("download_url") or "").strip()
+        if raw_download:
+            return self.__compose_url(raw_download)
+        return ""
 
     def __manual_item_dedup_key(self, item: dict) -> str:
         provider = self.__provider_family(item.get("provider"))
@@ -2896,38 +3186,435 @@ class SubtitleAgentBridge(_PluginBase):
         return text
 
     @staticmethod
-    def __classify_manual_failure(message: str) -> str:
-        text = str(message or "").strip().lower()
-        if "captcha" in text or "验证码" in text:
-            return "captcha"
-        if "timeout" in text or "timed out" in text or "超时" in text:
-            return "timeout"
-        if "未找到" in text or "not found" in text:
-            return "not_found"
-        if "no verified chinese" in text or "无可自动下载中文字幕" in text:
-            return "no_verified_chinese"
-        return "generic"
+    def __extract_captcha_payload(error_data: Any) -> Optional[dict]:
+        if not isinstance(error_data, dict):
+            return None
+        captcha = error_data.get("captcha")
+        return captcha if isinstance(captcha, dict) else None
+
+    def __captcha_task_response_data(
+        self,
+        *,
+        error_data: Optional[dict],
+        media_name: str,
+        target_file: str,
+    ) -> Optional[dict]:
+        captcha_payload = self.__extract_captcha_payload(error_data)
+        if not captcha_payload:
+            return None
+        task_data = self.__create_captcha_task(
+            captcha_payload=captcha_payload,
+            media_name=media_name,
+            target_file=target_file,
+        )
+        if not task_data:
+            return None
+        return {
+            "captcha_task_id": task_data.get("task_id"),
+            "challenge_id": task_data.get("challenge_id"),
+            "image_url": task_data.get("image_url"),
+            "reply_format": f"subcap {task_data.get('task_id')} 验证码",
+        }
+
+    def __create_captcha_task(
+        self,
+        *,
+        captcha_payload: Optional[dict],
+        media_name: str,
+        target_file: str,
+    ) -> Optional[dict]:
+        if not isinstance(captcha_payload, dict):
+            return None
+
+        challenge_id = str(captcha_payload.get("challenge_id") or "").strip()
+        if not challenge_id:
+            return None
+
+        tasks = self.__load_captcha_tasks()
+        for task_id, task in tasks.items():
+            if str(task.get("challenge_id") or "").strip() == challenge_id:
+                task["media_name"] = media_name
+                task["target_file"] = target_file
+                task["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self.__save_captcha_tasks(tasks)
+                task["task_id"] = task_id
+                task["image_url"] = self.__compose_url(str(task.get("image_path") or ""))
+                return task
+
+        task_id = uuid4().hex[:8]
+        image_path = str(captcha_payload.get("image_path") or "").strip()
+        task = {
+            "challenge_id": challenge_id,
+            "media_name": media_name,
+            "target_file": target_file,
+            "provider": str(captcha_payload.get("provider") or "").strip(),
+            "subtitle_id": str(captcha_payload.get("subtitle_id") or "").strip(),
+            "image_path": image_path,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        tasks[task_id] = task
+        self.__save_captcha_tasks(tasks)
+        task["task_id"] = task_id
+        task["image_url"] = self.__compose_url(image_path) if image_path else ""
+        return task
+
+    def __load_captcha_tasks(self) -> Dict[str, Dict[str, Any]]:
+        self.__cleanup_captcha_tasks()
+        raw = self.get_data("captcha_tasks") or {}
+        if not isinstance(raw, dict):
+            return {}
+        clean: Dict[str, Dict[str, Any]] = {}
+        for task_id, payload in raw.items():
+            if not isinstance(payload, dict):
+                continue
+            key = str(task_id or "").strip()
+            if key:
+                clean[key] = dict(payload)
+        return clean
+
+    def __save_captcha_tasks(self, tasks: Dict[str, Dict[str, Any]]) -> None:
+        self.save_data("captcha_tasks", tasks)
+
+    def __cleanup_captcha_tasks(self) -> None:
+        raw = self.get_data("captcha_tasks") or {}
+        if not isinstance(raw, dict):
+            return
+
+        now = datetime.now()
+        valid: Dict[str, Dict[str, Any]] = {}
+        changed = False
+        for task_id, payload in raw.items():
+            if not isinstance(payload, dict):
+                changed = True
+                continue
+            created_text = str(payload.get("created_at") or "").strip()
+            try:
+                created_at = datetime.strptime(created_text, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                changed = True
+                continue
+            if (now - created_at) > timedelta(hours=self._captcha_task_ttl_hours):
+                changed = True
+                continue
+            valid[str(task_id)] = dict(payload)
+
+        if changed:
+            self.__save_captcha_tasks(valid)
+
+    def __load_manual_jobs(self) -> Dict[str, Dict[str, Any]]:
+        raw = self.get_data("manual_jobs") or {}
+        if not isinstance(raw, dict):
+            return {}
+        clean: Dict[str, Dict[str, Any]] = {}
+        for job_id, payload in raw.items():
+            if not isinstance(payload, dict):
+                continue
+            key = str(job_id or "").strip()
+            if not key:
+                continue
+            item = dict(payload)
+            item["job_id"] = key
+            clean[key] = item
+        return clean
+
+    def __save_manual_jobs(self, jobs: Dict[str, Dict[str, Any]]) -> None:
+        self.save_data("manual_jobs", jobs)
+
+    def __cleanup_manual_jobs(self) -> None:
+        raw = self.get_data("manual_jobs") or {}
+        if not isinstance(raw, dict):
+            return
+        now = datetime.now()
+        valid: Dict[str, Dict[str, Any]] = {}
+        changed = False
+        for job_id, payload in raw.items():
+            if not isinstance(payload, dict):
+                changed = True
+                continue
+            created_text = str(payload.get("created_at") or "").strip()
+            try:
+                created_at = datetime.strptime(created_text, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                changed = True
+                continue
+            if (now - created_at) > timedelta(hours=self._manual_job_ttl_hours):
+                changed = True
+                continue
+            valid[str(job_id)] = dict(payload)
+        if changed:
+            self.__save_manual_jobs(valid)
+
+    def __save_manual_job(self, *, job_id: str, payload: Dict[str, Any]) -> None:
+        normalized = str(job_id or "").strip()
+        if not normalized:
+            return
+        with self._manual_job_lock:
+            self.__cleanup_manual_jobs()
+            jobs = self.__load_manual_jobs()
+            item = dict(payload or {})
+            item["job_id"] = normalized
+            jobs[normalized] = item
+            self.__save_manual_jobs(jobs)
+
+    def __update_manual_job(self, *, job_id: str, status: str, message: str, result_data: Optional[dict] = None) -> None:
+        normalized = str(job_id or "").strip()
+        if not normalized:
+            return
+        with self._manual_job_lock:
+            self.__cleanup_manual_jobs()
+            jobs = self.__load_manual_jobs()
+            payload = jobs.get(normalized)
+            if not isinstance(payload, dict):
+                return
+            payload["status"] = str(status or "").strip() or "running"
+            payload["message"] = str(message or "").strip()
+            payload["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if isinstance(result_data, dict):
+                payload["result_data"] = dict(result_data)
+            jobs[normalized] = payload
+            self.__save_manual_jobs(jobs)
+
+    def __submit_captcha_task(
+        self,
+        *,
+        task_id: str,
+        code: str,
+        message_context: Optional[Dict[str, Any]] = None,
+    ) -> schemas.Response:
+        normalized_task_id = str(task_id or "").strip()
+        normalized_code = str(code or "").strip()
+        if not normalized_task_id or not normalized_code:
+            response = schemas.Response(success=False, message="缺少 task_id 或 code")
+            if message_context:
+                self.__post_message_to_context(
+                    title="Subtitle Agent 验证码失败",
+                    text=response.message,
+                    message_context=message_context,
+                )
+            return response
+
+        tasks = self.__load_captcha_tasks()
+        task = tasks.get(normalized_task_id)
+        if not isinstance(task, dict):
+            response = schemas.Response(success=False, message="验证码任务不存在或已过期")
+            if message_context:
+                self.__post_message_to_context(
+                    title="Subtitle Agent 验证码失败",
+                    text=response.message,
+                    message_context=message_context,
+                )
+            return response
+
+        content, subtitle_format, message, error_data = self.__solve_captcha_download(
+            challenge_id=str(task.get("challenge_id") or ""),
+            code=normalized_code,
+        )
+        if not content:
+            refreshed = self.__extract_captcha_payload(error_data)
+            if refreshed:
+                task["challenge_id"] = str(refreshed.get("challenge_id") or task.get("challenge_id") or "").strip()
+                task["image_path"] = str(refreshed.get("image_path") or task.get("image_path") or "").strip()
+                task["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                tasks[normalized_task_id] = task
+                self.__save_captcha_tasks(tasks)
+
+            failure_message = self.__normalize_failure_message(message, "验证码提交失败")
+            response = schemas.Response(
+                success=False,
+                message=failure_message,
+                data=self.__captcha_task_response_data(
+                    error_data=error_data,
+                    media_name=str(task.get("media_name") or "未知媒体"),
+                    target_file=str(task.get("target_file") or ""),
+                ),
+            )
+            if message_context:
+                image_url = ""
+                if isinstance(response.data, dict):
+                    image_url = str(response.data.get("image_url") or "").strip()
+                self.__post_message_to_context(
+                    title="Subtitle Agent 验证码失败",
+                    text=f"{failure_message}\n请重新回复：subcap {normalized_task_id} 新验证码",
+                    message_context=message_context,
+                    image=image_url or None,
+                )
+            return response
+
+        target_file = str(task.get("target_file") or "").strip()
+        if not target_file:
+            tasks.pop(normalized_task_id, None)
+            self.__save_captcha_tasks(tasks)
+            response = schemas.Response(
+                success=True,
+                message="验证码通过，字幕已下载（未写入文件，因 target_file 为空）",
+                data={"size": len(content)},
+            )
+            if message_context:
+                self.__post_message_to_context(
+                    title="Subtitle Agent 验证码通过",
+                    text=response.message,
+                    message_context=message_context,
+                )
+            return response
+
+        subtitle_path = self.__build_subtitle_path(target_file, subtitle_format)
+        subtitle_file = Path(subtitle_path)
+        sync_note = ""
+        try:
+            subtitle_file.parent.mkdir(parents=True, exist_ok=True)
+            content, sync_note = self.__maybe_auto_sync_timing(
+                content=content,
+                subtitle_format=subtitle_format,
+                media_file=Path(target_file),
+                subtitle_file=subtitle_file,
+            )
+            subtitle_file.write_bytes(content)
+        except Exception as err:
+            response = schemas.Response(success=False, message=f"写入字幕失败: {str(err)}")
+            if message_context:
+                self.__post_message_to_context(
+                    title="Subtitle Agent 验证码失败",
+                    text=response.message,
+                    message_context=message_context,
+                )
+            return response
+
+        tasks.pop(normalized_task_id, None)
+        self.__save_captcha_tasks(tasks)
+        response_message = f"字幕下载完成: {subtitle_path}"
+        if sync_note:
+            response_message = f"{response_message}（{sync_note}）"
+        response = schemas.Response(
+            success=True,
+            message=response_message,
+            data={"path": subtitle_path, "size": len(content), "sync": sync_note},
+        )
+        if message_context:
+            self.__post_message_to_context(
+                title="Subtitle Agent 验证码通过",
+                text=f"媒体: {task.get('media_name')}\n{response_message}",
+                message_context=message_context,
+            )
+        return response
+
+    def __solve_captcha_download(
+        self,
+        *,
+        challenge_id: str,
+        code: str,
+    ) -> Tuple[Optional[bytes], str, Optional[str], Optional[dict]]:
+        solve_url = self.__compose_url("/api/v1/subtitles/captcha/solve")
+        body_bytes = json.dumps(
+            {
+                "challenge_id": challenge_id,
+                "code": code,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        try:
+            request = Request(
+                url=solve_url,
+                data=body_bytes,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "*/*",
+                },
+                method="POST",
+            )
+            with urlopen(request, timeout=self._timeout) as res:
+                status_code = int(getattr(res, "status", 200))
+                content_type = str(res.headers.get("Content-Type") or "").lower()
+                content_disposition = str(res.headers.get("Content-Disposition") or "")
+                content = res.read()
+        except Exception as err:
+            return None, "srt", f"请求验证码接口失败: {str(err)}", None
+
+        if status_code != 200:
+            return None, "srt", f"验证码接口返回错误: {status_code}", None
+
+        if "application/json" in content_type:
+            try:
+                body = json.loads(content.decode("utf-8", errors="ignore"))
+            except Exception:
+                body = None
+            if isinstance(body, dict) and body.get("success") is not True:
+                error_data = body.get("data") if isinstance(body.get("data"), dict) else None
+                return None, "srt", str(body.get("message") or "验证码处理失败"), error_data
+
+        if not content:
+            return None, "srt", "验证码接口返回空内容", None
+
+        subtitle_format = self.__subtitle_format_from_response(
+            content_disposition=content_disposition,
+            content_type=content_type,
+            fallback="srt",
+        )
+        return content, subtitle_format, None, None
 
     @staticmethod
-    def __manual_failure_hint(kind: str) -> str:
-        if kind == "captcha":
-            return "目标站点触发验证码，自动下载受限。请先在浏览器打开候选链接完成验证后再重试。"
-        if kind == "timeout":
-            return "请求超时。可稍后重试，或提高插件 HTTP 超时后再补字幕。"
-        if kind == "no_verified_chinese":
-            return "自动链路未命中可验证的中文字幕。可先手动下载候选字幕，后续等待新字幕再自动回填。"
-        if kind == "not_found":
-            return "当前源未检索到结果。可用片名别名或英文名重试。"
+    def __subtitle_format_from_response(
+        *,
+        content_disposition: str,
+        content_type: str,
+        fallback: str = "srt",
+    ) -> str:
+        filename_match = re.search(r"filename\\*?=(?:UTF-8''|\"?)([^\";]+)", content_disposition, re.IGNORECASE)
+        if filename_match:
+            suffix = Path(filename_match.group(1)).suffix.lower().lstrip(".")
+            if suffix:
+                return suffix
+        if "subrip" in content_type:
+            return "srt"
+        if "ass" in content_type:
+            return "ass"
+        return fallback
+
+    @staticmethod
+    def __extract_message_context(event_data: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "channel": event_data.get("channel") or event_data.get("source"),
+            "userid": event_data.get("userid") or event_data.get("user") or event_data.get("user_id"),
+        }
+
+    @staticmethod
+    def __extract_user_message_text(event_data: Dict[str, Any]) -> str:
+        for key in ("text", "content", "message"):
+            value = event_data.get(key)
+            if value:
+                return str(value).strip()
         return ""
 
     @staticmethod
-    def __manual_search_keyword(media_name: str) -> str:
-        text = str(media_name or "").strip()
-        if not text:
-            return ""
-        text = re.sub(r"\s+S\d{2}E\d{2}\b.*$", "", text)
-        text = re.sub(r"\s+\(\d{4}\)\s*$", "", text)
-        return text.strip()
+    def __parse_captcha_reply(text: str) -> Optional[Tuple[str, str]]:
+        matched = re.match(r"^\s*/?subcap(?:tcha)?\s+([A-Za-z0-9]{4,32})\s+([A-Za-z0-9]{3,16})\s*$", text, re.I)
+        if not matched:
+            return None
+        return matched.group(1), matched.group(2)
+
+    def __post_message_to_context(
+        self,
+        *,
+        title: str,
+        text: str,
+        message_context: Optional[Dict[str, Any]],
+        image: Optional[str] = None,
+    ) -> None:
+        payload: Dict[str, Any] = {
+            "mtype": NotificationType.Plugin,
+            "title": title,
+            "text": text,
+        }
+        if image:
+            payload["image"] = image
+        if isinstance(message_context, dict):
+            channel = message_context.get("channel")
+            userid = message_context.get("userid")
+            if channel:
+                payload["channel"] = channel
+            if userid:
+                payload["userid"] = userid
+        self.post_message(**payload)
 
     @staticmethod
     def __to_int(value: Any) -> Optional[int]:
