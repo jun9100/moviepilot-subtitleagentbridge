@@ -2,6 +2,7 @@ import json
 import re
 import subprocess
 import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -28,7 +29,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.39"
+    plugin_version = "0.5.40"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -69,6 +70,9 @@ class SubtitleAgentBridge(_PluginBase):
     _notify_success_detail_limit: int = 5
     _captcha_task_ttl_hours: int = 6
     _manual_job_ttl_hours: int = 24
+    _captcha_submit_dedup_seconds: float = 2.0
+    _recent_captcha_submit_lock = threading.Lock()
+    _recent_captcha_submits: Dict[str, float] = {}
 
     _subtitle_suffixes = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
     _chinese_audio_lang_aliases = {
@@ -216,6 +220,7 @@ class SubtitleAgentBridge(_PluginBase):
         self._media_probe_cache = {}
         self._nfo_chinese_cache = {}
         self._season_embedded_hint_cache = {}
+        self._recent_captcha_submits = {}
         self.__cleanup_captcha_tasks()
         self.__cleanup_manual_jobs()
         self.__start_periodic_worker()
@@ -913,16 +918,23 @@ class SubtitleAgentBridge(_PluginBase):
                 ):
                     self.__post_message_to_context(
                         title="Subtitle Agent 验证码帮助",
-                        text="可用命令：\n1) subcap 任务ID 验证码\n2) substatus [任务ID]",
+                        text="可用命令：\n1) /subcap 任务ID 验证码\n2) /substatus [任务ID]",
                         message_context=self.__extract_message_context(event_data),
                     )
                 return
 
             task_id, code = parsed
+            message_context = self.__extract_message_context(event_data)
+            if self.__is_duplicate_captcha_submit(
+                task_id=task_id,
+                code=code,
+                message_context=message_context,
+            ):
+                return
             self.__submit_captcha_task(
                 task_id=task_id,
                 code=code,
-                message_context=self.__extract_message_context(event_data),
+                message_context=message_context,
             )
 
     @eventmanager.register(EventType.PluginAction)
@@ -977,6 +989,12 @@ class SubtitleAgentBridge(_PluginBase):
             return
 
         task_id, code = parsed
+        if self.__is_duplicate_captcha_submit(
+            task_id=task_id,
+            code=code,
+            message_context=message_context,
+        ):
+            return
         self.__submit_captcha_task(
             task_id=task_id,
             code=code,
@@ -3308,7 +3326,53 @@ class SubtitleAgentBridge(_PluginBase):
         text = str(message or "").strip()
         if not text or text.lower() in {"ok", "success", "none"}:
             return default
+        lowered = text.lower()
+        if "<svg" in lowered and "</svg>" in lowered:
+            return default
+        if "captcha challenge not found or expired" in lowered:
+            return "验证码任务不存在或已过期，请重新触发下载任务"
+        if (
+            "subhd captcha expired or invalid" in lowered
+            or "temporary page expired" in lowered
+            or "page expired" in lowered
+            or "临时页面已经失效" in text
+            or "页面已经失效" in text
+            or "时间过长" in text
+        ):
+            return "验证码错误或已过期，请按最新验证码图重试"
         return text
+
+    def __is_duplicate_captcha_submit(
+        self,
+        *,
+        task_id: str,
+        code: str,
+        message_context: Optional[Dict[str, Any]],
+    ) -> bool:
+        normalized_task_id = str(task_id or "").strip().lower()
+        normalized_code = str(code or "").strip().lower()
+        if not normalized_task_id or not normalized_code:
+            return False
+
+        channel = ""
+        userid = ""
+        if isinstance(message_context, dict):
+            channel = str(message_context.get("channel") or "").strip().lower()
+            userid = str(message_context.get("userid") or "").strip().lower()
+        dedup_key = f"{channel}|{userid}|{normalized_task_id}|{normalized_code}"
+        now = time.monotonic()
+
+        with self._recent_captcha_submit_lock:
+            stale = [key for key, ts in self._recent_captcha_submits.items() if (now - ts) > 30.0]
+            for key in stale:
+                self._recent_captcha_submits.pop(key, None)
+
+            last = self._recent_captcha_submits.get(dedup_key)
+            if last is not None and (now - last) <= self._captcha_submit_dedup_seconds:
+                return True
+
+            self._recent_captcha_submits[dedup_key] = now
+        return False
 
     @staticmethod
     def __extract_captcha_payload(error_data: Any) -> Optional[dict]:
