@@ -28,7 +28,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.33"
+    plugin_version = "0.5.36"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -225,7 +225,29 @@ class SubtitleAgentBridge(_PluginBase):
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
-        return []
+        return [
+            {
+                "cmd": "/subcap",
+                "event": EventType.PluginAction,
+                "desc": "提交字幕验证码: /subcap 任务ID 验证码",
+                "category": "字幕",
+                "data": {"action": "subtitle_agent_subcap"},
+            },
+            {
+                "cmd": "/substatus",
+                "event": EventType.PluginAction,
+                "desc": "查询字幕任务状态: /substatus [任务ID]",
+                "category": "字幕",
+                "data": {"action": "subtitle_agent_substatus"},
+            },
+            {
+                "cmd": "/subhelp",
+                "event": EventType.PluginAction,
+                "desc": "查看字幕验证码命令帮助",
+                "category": "字幕",
+                "data": {"action": "subtitle_agent_subhelp"},
+            },
+        ]
 
     def get_api(self) -> List[Dict[str, Any]]:
         return [
@@ -881,6 +903,64 @@ class SubtitleAgentBridge(_PluginBase):
                 code=code,
                 message_context=self.__extract_message_context(event_data),
             )
+
+    @eventmanager.register(EventType.PluginAction)
+    def handle_plugin_action(self, event: Event):
+        if not self._enabled or not self._host or not event or not event.event_data:
+            return
+
+        event_data = event.event_data or {}
+        action = str(event_data.get("action") or "").strip().lower()
+        if action not in {"subtitle_agent_subcap", "subtitle_agent_substatus", "subtitle_agent_subhelp"}:
+            return
+
+        message_context = self.__extract_message_context(event_data)
+        arg_str = str(event_data.get("arg_str") or "").strip()
+        fallback_text = self.__extract_user_message_text(event_data)
+
+        if action == "subtitle_agent_subhelp":
+            self.__post_message_to_context(
+                title="Subtitle Agent 验证码帮助",
+                text="可用命令：\n1) /subcap 任务ID 验证码\n2) /substatus [任务ID]",
+                message_context=message_context,
+            )
+            return
+
+        if action == "subtitle_agent_substatus":
+            status_arg = self.__extract_command_args(
+                command="substatus",
+                arg_str=arg_str,
+                fallback_text=fallback_text,
+            )
+            job_id_match = re.match(r"^([A-Za-z0-9]{4,32})", status_arg or "")
+            job_id = job_id_match.group(1) if job_id_match else ""
+            self.__post_message_to_context(
+                title="Subtitle Agent 任务状态",
+                text=self.__render_manual_job_status(job_id=job_id),
+                message_context=message_context,
+            )
+            return
+
+        cap_arg = self.__extract_command_args(
+            command="subcap",
+            arg_str=arg_str,
+            fallback_text=fallback_text,
+        )
+        parsed = self.__parse_captcha_reply(cap_arg) or self.__parse_captcha_reply(f"/subcap {cap_arg}")
+        if parsed is None:
+            self.__post_message_to_context(
+                title="Subtitle Agent 验证码格式错误",
+                text="请发送: /subcap 任务ID 图中字母\n示例: /subcap 91e65710 AbCd",
+                message_context=message_context,
+            )
+            return
+
+        task_id, code = parsed
+        self.__submit_captcha_task(
+            task_id=task_id,
+            code=code,
+            message_context=message_context,
+        )
 
     @eventmanager.register(EventType.TransferComplete)
     def download_on_transfer_complete(self, event: Event):
@@ -3613,6 +3693,16 @@ class SubtitleAgentBridge(_PluginBase):
             if value:
                 return str(value).strip()
         return ""
+
+    @staticmethod
+    def __extract_command_args(command: str, arg_str: str, fallback_text: str) -> str:
+        text = str(arg_str or "").strip()
+        if text:
+            return text
+        fallback = str(fallback_text or "").strip()
+        if not fallback:
+            return ""
+        return re.sub(rf"^\s*/?{re.escape(command)}\b", "", fallback, flags=re.IGNORECASE).strip()
 
     @staticmethod
     def __parse_captcha_reply(text: str) -> Optional[Tuple[str, str]]:
