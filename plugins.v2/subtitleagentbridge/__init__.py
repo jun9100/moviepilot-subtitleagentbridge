@@ -29,7 +29,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.40"
+    plugin_version = "0.5.41"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -3331,6 +3331,13 @@ class SubtitleAgentBridge(_PluginBase):
             return default
         if "captcha challenge not found or expired" in lowered:
             return "验证码任务不存在或已过期，请重新触发下载任务"
+        if (
+            "subhd captcha validation failed" in lowered
+            or "captcha validation failed" in lowered
+            or "captcha code is required" in lowered
+            or "验证码校验失败" in text
+        ):
+            return "验证码错误，请按最新验证码图重试"
         if (
             "subhd captcha expired or invalid" in lowered
             or "temporary page expired" in lowered
