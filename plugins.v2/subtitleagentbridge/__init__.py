@@ -29,7 +29,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.42"
+    plugin_version = "0.5.43"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -3240,6 +3240,8 @@ class SubtitleAgentBridge(_PluginBase):
             image_url = str(task_data.get("image_url") or "").strip() or None
             if image_url:
                 text_lines.append(f"验证码图: {image_url}")
+            else:
+                text_lines.append("验证码图: 当前直链不可用，请打开详情页查看验证码")
             detail_url = str(task_data.get("detail_url") or "").strip()
             if detail_url:
                 text_lines.append(f"详情页: {detail_url}")
@@ -3436,14 +3438,23 @@ class SubtitleAgentBridge(_PluginBase):
                 detail_url = str(captcha_payload.get("detail_url") or "").strip()
                 if detail_url:
                     task["detail_url"] = detail_url
+                image_path = str(captcha_payload.get("image_path") or "").strip()
+                if image_path:
+                    task["image_path"] = image_path
+                task["image_available"] = bool(captcha_payload.get("image_available"))
                 task["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 self.__save_captcha_tasks(tasks)
                 task["task_id"] = task_id
-                task["image_url"] = self.__compose_url(str(task.get("image_path") or ""))
+                task["image_url"] = (
+                    self.__compose_url(str(task.get("image_path") or ""))
+                    if bool(task.get("image_available")) and str(task.get("image_path") or "").strip()
+                    else ""
+                )
                 return task
 
         task_id = uuid4().hex[:8]
         image_path = str(captcha_payload.get("image_path") or "").strip()
+        image_available = bool(captcha_payload.get("image_available"))
         task = {
             "challenge_id": challenge_id,
             "media_name": media_name,
@@ -3451,6 +3462,7 @@ class SubtitleAgentBridge(_PluginBase):
             "provider": str(captcha_payload.get("provider") or "").strip(),
             "subtitle_id": str(captcha_payload.get("subtitle_id") or "").strip(),
             "image_path": image_path,
+            "image_available": image_available,
             "detail_url": str(captcha_payload.get("detail_url") or "").strip(),
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -3458,7 +3470,7 @@ class SubtitleAgentBridge(_PluginBase):
         tasks[task_id] = task
         self.__save_captcha_tasks(tasks)
         task["task_id"] = task_id
-        task["image_url"] = self.__compose_url(image_path) if image_path else ""
+        task["image_url"] = self.__compose_url(image_path) if (image_path and image_available) else ""
         return task
 
     def __load_captcha_tasks(self) -> Dict[str, Dict[str, Any]]:
@@ -3644,6 +3656,8 @@ class SubtitleAgentBridge(_PluginBase):
                 ]
                 if image_url:
                     retry_lines.append(f"验证码图：{image_url}")
+                else:
+                    retry_lines.append("验证码图：当前直链不可用，请打开详情页查看验证码")
                 if detail_url:
                     retry_lines.append(f"详情页：{detail_url}")
                 self.__post_message_to_context(
