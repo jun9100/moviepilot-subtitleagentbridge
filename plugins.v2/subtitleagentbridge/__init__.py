@@ -28,7 +28,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.36"
+    plugin_version = "0.5.37"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -234,6 +234,13 @@ class SubtitleAgentBridge(_PluginBase):
                 "data": {"action": "subtitle_agent_subcap"},
             },
             {
+                "cmd": "/Subcap",
+                "event": EventType.PluginAction,
+                "desc": "提交字幕验证码: /Subcap 任务ID 验证码",
+                "category": "字幕",
+                "data": {"action": "subtitle_agent_subcap"},
+            },
+            {
                 "cmd": "/substatus",
                 "event": EventType.PluginAction,
                 "desc": "查询字幕任务状态: /substatus [任务ID]",
@@ -241,7 +248,21 @@ class SubtitleAgentBridge(_PluginBase):
                 "data": {"action": "subtitle_agent_substatus"},
             },
             {
+                "cmd": "/Substatus",
+                "event": EventType.PluginAction,
+                "desc": "查询字幕任务状态: /Substatus [任务ID]",
+                "category": "字幕",
+                "data": {"action": "subtitle_agent_substatus"},
+            },
+            {
                 "cmd": "/subhelp",
+                "event": EventType.PluginAction,
+                "desc": "查看字幕验证码命令帮助",
+                "category": "字幕",
+                "data": {"action": "subtitle_agent_subhelp"},
+            },
+            {
+                "cmd": "/Subhelp",
                 "event": EventType.PluginAction,
                 "desc": "查看字幕验证码命令帮助",
                 "category": "字幕",
