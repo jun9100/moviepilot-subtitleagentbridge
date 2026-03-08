@@ -4,12 +4,14 @@ import subprocess
 import threading
 import time
 from datetime import datetime, timedelta
+from html import escape
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
+from fastapi.responses import HTMLResponse
 from app import schemas
 from app.core.config import settings
 from app.core.event import Event, eventmanager
@@ -29,7 +31,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.43"
+    plugin_version = "0.5.44"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -38,6 +40,7 @@ class SubtitleAgentBridge(_PluginBase):
 
     _enabled: bool = False
     _host: str = ""
+    _web_base_url: str = ""
     _search_path: str = "/api/v1/moviepilot/subtitles/search"
     _languages: str = "zh-cn,zh-tw"
     _limit: int = 5
@@ -73,6 +76,7 @@ class SubtitleAgentBridge(_PluginBase):
     _captcha_submit_dedup_seconds: float = 2.0
     _recent_captcha_submit_lock = threading.Lock()
     _recent_captcha_submits: Dict[str, float] = {}
+    _refresh_code_keywords = {"refresh", "reload", "new", "again"}
 
     _subtitle_suffixes = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
     _chinese_audio_lang_aliases = {
@@ -190,6 +194,7 @@ class SubtitleAgentBridge(_PluginBase):
 
         self._enabled = bool(config.get("enabled"))
         self._host = self.__normalize_host(config.get("host"))
+        self._web_base_url = self.__normalize_host(config.get("web_base_url"))
         self._search_path = str(config.get("search_path") or "/api/v1/moviepilot/subtitles/search")
         self._languages = str(config.get("languages") or "zh-cn,zh-tw")
         self._limit = int(config.get("limit") or 5)
@@ -313,6 +318,13 @@ class SubtitleAgentBridge(_PluginBase):
                 "description": "为待处理的 SubHD 验证码任务提交验证码并继续下载字幕。",
             },
             {
+                "path": "/captcha_web",
+                "endpoint": self.captcha_web,
+                "methods": ["GET"],
+                "summary": "验证码网页回填",
+                "description": "打开网页查看最新验证码并提交，无需在TG手动输入命令。",
+            },
+            {
                 "path": "/backfill_directory",
                 "endpoint": self.backfill_directory,
                 "methods": ["GET"],
@@ -369,6 +381,25 @@ class SubtitleAgentBridge(_PluginBase):
                                     }
                                 ],
                             },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "web_base_url",
+                                            "label": "网页回填基地址(可选)",
+                                            "placeholder": "http://192.168.12.4:5010",
+                                        },
+                                    }
+                                ],
+                            }
                         ],
                     },
                     {
@@ -717,6 +748,7 @@ class SubtitleAgentBridge(_PluginBase):
         ], {
             "enabled": False,
             "host": "http://127.0.0.1:8178",
+            "web_base_url": "",
             "search_path": "/api/v1/moviepilot/subtitles/search",
             "languages": "zh-cn,zh-tw",
             "limit": 5,
@@ -909,7 +941,7 @@ class SubtitleAgentBridge(_PluginBase):
                 if re.match(r"^\s*/?subcap(?:tcha)?\b", text, re.IGNORECASE):
                     self.__post_message_to_context(
                         title="Subtitle Agent 验证码格式错误",
-                        text="请发送: /subcap 任务ID 图中字母\n示例: /subcap 91e65710 AbCd",
+                        text="请发送: /subcap 任务ID 图中字母\n示例: /subcap 91e65710 AbCd\n刷新验证码: /subcap 91e65710 refresh",
                         message_context=self.__extract_message_context(event_data),
                     )
                     return
@@ -918,7 +950,7 @@ class SubtitleAgentBridge(_PluginBase):
                 ):
                     self.__post_message_to_context(
                         title="Subtitle Agent 验证码帮助",
-                        text="可用命令：\n1) /subcap 任务ID 验证码\n2) /substatus [任务ID]",
+                        text="可用命令：\n1) /subcap 任务ID 验证码\n2) /subcap 任务ID refresh\n3) /substatus [任务ID]",
                         message_context=self.__extract_message_context(event_data),
                     )
                 return
@@ -954,7 +986,7 @@ class SubtitleAgentBridge(_PluginBase):
         if action == "subtitle_agent_subhelp":
             self.__post_message_to_context(
                 title="Subtitle Agent 验证码帮助",
-                text="可用命令：\n1) /subcap 任务ID 验证码\n2) /substatus [任务ID]",
+                text="可用命令：\n1) /subcap 任务ID 验证码\n2) /subcap 任务ID refresh\n3) /substatus [任务ID]",
                 message_context=message_context,
             )
             return
@@ -983,7 +1015,7 @@ class SubtitleAgentBridge(_PluginBase):
         if parsed is None:
             self.__post_message_to_context(
                 title="Subtitle Agent 验证码格式错误",
-                text="请发送: /subcap 任务ID 图中字母\n示例: /subcap 91e65710 AbCd",
+                text="请发送: /subcap 任务ID 图中字母\n示例: /subcap 91e65710 AbCd\n刷新验证码: /subcap 91e65710 refresh",
                 message_context=message_context,
             )
             return
@@ -1390,9 +1422,12 @@ class SubtitleAgentBridge(_PluginBase):
                     captcha_task_id = str(response.data.get("captcha_task_id") or "").strip()
                     detail_url = str(response.data.get("detail_url") or "").strip()
                     image_url = str(response.data.get("image_url") or "").strip()
+                    web_url = str(response.data.get("web_url") or "").strip()
                     if captcha_task_id:
                         lines.append("结果: 需要验证码")
                         lines.append(f"验证码任务: {captcha_task_id}")
+                        if web_url:
+                            lines.append(f"网页回填: {web_url}")
                         if detail_url:
                             lines.append(f"详情页: {detail_url}")
                         if image_url:
@@ -1424,6 +1459,54 @@ class SubtitleAgentBridge(_PluginBase):
         if apikey != settings.API_TOKEN:
             return schemas.Response(success=False, message="API密钥错误")
         return self.__submit_captcha_task(task_id=task_id, code=code)
+
+    def captcha_web(
+        self,
+        token: str = "",
+        task_id: str = "",
+        code: str = "",
+        action: str = "",
+        apikey: str = "",
+    ) -> HTMLResponse:
+        normalized_token = str(token or "").strip().lower()
+        normalized_task_id = str(task_id or "").strip().lower()
+        if not normalized_task_id and normalized_token:
+            normalized_task_id = self.__find_captcha_task_id_by_web_token(normalized_token)
+
+        tasks = self.__load_captcha_tasks()
+        task = tasks.get(normalized_task_id) if normalized_task_id else None
+        if not isinstance(task, dict):
+            html = self.__render_captcha_web_html(
+                task_data=None,
+                result_text="验证码任务不存在或已过期，请回到 Telegram 获取最新通知。",
+                result_ok=False,
+            )
+            return HTMLResponse(content=html, status_code=404)
+
+        result: Optional[schemas.Response] = None
+        normalized_action = str(action or "").strip().lower()
+        normalized_code = str(code or "").strip()
+        if normalized_action in self._refresh_code_keywords or normalized_code.lower() in self._refresh_code_keywords:
+            result = self.__refresh_captcha_task(task_id=normalized_task_id)
+        elif normalized_code:
+            result = self.__submit_captcha_task(task_id=normalized_task_id, code=normalized_code)
+
+        latest_tasks = self.__load_captcha_tasks()
+        latest_task = latest_tasks.get(normalized_task_id)
+        view_data = self.__captcha_task_view_data(task_id=normalized_task_id, task=latest_task) if latest_task else None
+
+        result_text = ""
+        result_ok = False
+        if isinstance(result, schemas.Response):
+            result_text = str(result.message or "").strip()
+            result_ok = bool(result.success)
+
+        html = self.__render_captcha_web_html(
+            task_data=view_data,
+            result_text=result_text,
+            result_ok=result_ok,
+        )
+        return HTMLResponse(content=html, status_code=200 if view_data or result_ok else 404)
 
     def backfill_directory(
         self,
@@ -3236,8 +3319,12 @@ class SubtitleAgentBridge(_PluginBase):
             text_lines.append(f"任务ID: {task_id}")
             text_lines.append(f"回复: /subcap {task_id} 图中字母")
             text_lines.append(f"示例: /subcap {task_id} AbCd")
+            text_lines.append(f"刷新: /subcap {task_id} refresh")
             text_lines.append("注意: 验证失败后会刷新验证码，请仅使用最新一条通知中的验证码图")
             image_url = str(task_data.get("image_url") or "").strip() or None
+            web_url = str(task_data.get("web_url") or "").strip()
+            if web_url:
+                text_lines.append(f"网页回填: {web_url}")
             if image_url:
                 text_lines.append(f"验证码图: {image_url}")
             else:
@@ -3413,6 +3500,7 @@ class SubtitleAgentBridge(_PluginBase):
             "challenge_id": task_data.get("challenge_id"),
             "image_url": task_data.get("image_url"),
             "detail_url": task_data.get("detail_url"),
+            "web_url": task_data.get("web_url"),
             "reply_format": f"/subcap {task_data.get('task_id')} 图中字母",
         }
 
@@ -3442,6 +3530,7 @@ class SubtitleAgentBridge(_PluginBase):
                 if image_path:
                     task["image_path"] = image_path
                 task["image_available"] = bool(captcha_payload.get("image_available"))
+                task["web_token"] = str(task.get("web_token") or "").strip() or uuid4().hex
                 task["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 self.__save_captcha_tasks(tasks)
                 task["task_id"] = task_id
@@ -3450,11 +3539,15 @@ class SubtitleAgentBridge(_PluginBase):
                     if bool(task.get("image_available")) and str(task.get("image_path") or "").strip()
                     else ""
                 )
+                task["web_url"] = self.__compose_web_url(
+                    f"/api/v1/plugin/SubtitleAgentBridge/captcha_web?token={task['web_token']}"
+                )
                 return task
 
         task_id = uuid4().hex[:8]
         image_path = str(captcha_payload.get("image_path") or "").strip()
         image_available = bool(captcha_payload.get("image_available"))
+        web_token = uuid4().hex
         task = {
             "challenge_id": challenge_id,
             "media_name": media_name,
@@ -3463,6 +3556,7 @@ class SubtitleAgentBridge(_PluginBase):
             "subtitle_id": str(captcha_payload.get("subtitle_id") or "").strip(),
             "image_path": image_path,
             "image_available": image_available,
+            "web_token": web_token,
             "detail_url": str(captcha_payload.get("detail_url") or "").strip(),
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -3471,7 +3565,129 @@ class SubtitleAgentBridge(_PluginBase):
         self.__save_captcha_tasks(tasks)
         task["task_id"] = task_id
         task["image_url"] = self.__compose_url(image_path) if (image_path and image_available) else ""
+        task["web_url"] = self.__compose_web_url(f"/api/v1/plugin/SubtitleAgentBridge/captcha_web?token={web_token}")
         return task
+
+    def __find_captcha_task_id_by_web_token(self, token: str) -> str:
+        normalized = str(token or "").strip().lower()
+        if not normalized:
+            return ""
+        tasks = self.__load_captcha_tasks()
+        for task_id, payload in tasks.items():
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("web_token") or "").strip().lower() == normalized:
+                return str(task_id or "").strip().lower()
+        return ""
+
+    def __captcha_task_view_data(self, *, task_id: str, task: Optional[dict]) -> Optional[dict]:
+        if not isinstance(task, dict):
+            return None
+        normalized_task_id = str(task_id or "").strip().lower()
+        web_token = str(task.get("web_token") or "").strip()
+        if not web_token and normalized_task_id:
+            web_token = uuid4().hex
+            tasks = self.__load_captcha_tasks()
+            existing = tasks.get(normalized_task_id)
+            if isinstance(existing, dict):
+                existing["web_token"] = web_token
+                tasks[normalized_task_id] = existing
+                self.__save_captcha_tasks(tasks)
+                task = existing
+        image_path = str(task.get("image_path") or "").strip()
+        image_available = bool(task.get("image_available"))
+        image_url = self.__compose_url(image_path) if (image_available and image_path) else ""
+        web_url = self.__compose_web_url(f"/api/v1/plugin/SubtitleAgentBridge/captcha_web?token={web_token}") if web_token else ""
+        return {
+            "captcha_task_id": normalized_task_id,
+            "challenge_id": str(task.get("challenge_id") or "").strip(),
+            "image_url": image_url,
+            "detail_url": str(task.get("detail_url") or "").strip(),
+            "web_url": web_url,
+            "reply_format": f"/subcap {normalized_task_id} 图中字母",
+            "token": web_token,
+            "media_name": str(task.get("media_name") or "").strip(),
+            "target_file": str(task.get("target_file") or "").strip(),
+        }
+
+    def __render_captcha_web_html(
+        self,
+        *,
+        task_data: Optional[dict],
+        result_text: str = "",
+        result_ok: bool = False,
+    ) -> str:
+        safe_result = escape(str(result_text or "").strip())
+        result_block = ""
+        if safe_result:
+            color = "#16a34a" if result_ok else "#b91c1c"
+            result_block = (
+                f'<div style="margin:12px 0;padding:10px 12px;border-radius:8px;'
+                f'background:#f8fafc;border:1px solid #e2e8f0;color:{color};font-size:14px;">{safe_result}</div>'
+            )
+
+        if not isinstance(task_data, dict):
+            return (
+                "<!doctype html><html><head><meta charset='utf-8'><title>Subtitle Agent 验证码</title></head>"
+                "<body style='font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;padding:20px;'>"
+                "<h2 style='margin:0 0 12px;'>Subtitle Agent 验证码</h2>"
+                f"{result_block or '<p>验证码任务不存在或已过期。</p>'}"
+                "</body></html>"
+            )
+
+        token = escape(str(task_data.get("token") or ""))
+        media_name = escape(str(task_data.get("media_name") or "未知媒体"))
+        task_id = escape(str(task_data.get("captcha_task_id") or ""))
+        image_url = str(task_data.get("image_url") or "").strip()
+        detail_url = str(task_data.get("detail_url") or "").strip()
+        target_file = escape(str(task_data.get("target_file") or ""))
+
+        image_block = ""
+        if image_url:
+            image_src = escape(f"{image_url}?_ts={int(time.time())}")
+            image_block = (
+                f"<img src='{image_src}' alt='captcha' "
+                "style='max-width:420px;width:100%;border:1px solid #e2e8f0;border-radius:8px;background:#fff;'/>"
+            )
+        else:
+            image_block = "<div style='color:#475569;'>当前验证码图直链不可用，请打开详情页查看验证码。</div>"
+
+        detail_block = ""
+        if detail_url:
+            detail_block = (
+                f"<div style='margin-top:8px;'><a href='{escape(detail_url)}' target='_blank'>打开 SubHD 详情页查看验证码</a></div>"
+            )
+
+        return f"""<!doctype html>
+<html>
+<head>
+  <meta charset='utf-8'>
+  <meta name='viewport' content='width=device-width, initial-scale=1'>
+  <title>Subtitle Agent 验证码回填</title>
+</head>
+<body style='font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;padding:18px;max-width:720px;margin:0 auto;'>
+  <h2 style='margin:0 0 10px;'>Subtitle Agent 验证码回填</h2>
+  <div style='color:#334155;font-size:14px;line-height:1.6;'>
+    <div>媒体: {media_name}</div>
+    <div>任务ID: {task_id}</div>
+    <div>目标文件: {target_file or '-'}</div>
+  </div>
+  {result_block}
+  <div style='margin:14px 0;'>{image_block}{detail_block}</div>
+  <form method='get' action='' style='display:flex;gap:8px;align-items:center;flex-wrap:wrap;'>
+    <input type='hidden' name='token' value='{token}' />
+    <input type='text' name='code' placeholder='输入验证码字母' autocomplete='off'
+      style='flex:1;min-width:180px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;' />
+    <button type='submit' style='padding:10px 14px;border:0;border-radius:8px;background:#2563eb;color:#fff;'>提交验证码</button>
+  </form>
+  <form method='get' action='' style='margin-top:10px;'>
+    <input type='hidden' name='token' value='{token}' />
+    <input type='hidden' name='action' value='refresh' />
+    <button type='submit' style='padding:9px 13px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;'>刷新验证码</button>
+  </form>
+  <div style='margin-top:12px;color:#475569;font-size:13px;'>也可在 Telegram 回复: /subcap {task_id} 图中字母</div>
+</body>
+</html>"""
 
     def __load_captcha_tasks(self) -> Dict[str, Dict[str, Any]]:
         self.__cleanup_captcha_tasks()
@@ -3620,6 +3836,30 @@ class SubtitleAgentBridge(_PluginBase):
                 )
             return response
 
+        if normalized_code.lower() in self._refresh_code_keywords:
+            response = self.__refresh_captcha_task(task_id=normalized_task_id)
+            if message_context:
+                lines = [str(response.message or "验证码已刷新，请填写新验证码")]
+                if isinstance(response.data, dict):
+                    web_url = str(response.data.get("web_url") or "").strip()
+                    image_url = str(response.data.get("image_url") or "").strip()
+                    detail_url = str(response.data.get("detail_url") or "").strip()
+                    if web_url:
+                        lines.append(f"网页回填：{web_url}")
+                    if image_url:
+                        lines.append(f"验证码图：{image_url}")
+                    else:
+                        lines.append("验证码图：当前直链不可用，请打开详情页查看验证码")
+                    if detail_url:
+                        lines.append(f"详情页：{detail_url}")
+                self.__post_message_to_context(
+                    title="Subtitle Agent 验证码已刷新",
+                    text="\n".join(lines),
+                    message_context=message_context,
+                    image=str((response.data or {}).get("image_url") or "").strip() or None if isinstance(response.data, dict) else None,
+                )
+            return response
+
         content, subtitle_format, message, error_data = self.__solve_captcha_download(
             challenge_id=str(task.get("challenge_id") or ""),
             code=normalized_code,
@@ -3629,6 +3869,7 @@ class SubtitleAgentBridge(_PluginBase):
             if refreshed:
                 task["challenge_id"] = str(refreshed.get("challenge_id") or task.get("challenge_id") or "").strip()
                 task["image_path"] = str(refreshed.get("image_path") or task.get("image_path") or "").strip()
+                task["image_available"] = bool(refreshed.get("image_available"))
                 task["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 tasks[normalized_task_id] = task
                 self.__save_captcha_tasks(tasks)
@@ -3646,14 +3887,18 @@ class SubtitleAgentBridge(_PluginBase):
             if message_context:
                 image_url = ""
                 detail_url = ""
+                web_url = ""
                 if isinstance(response.data, dict):
                     image_url = str(response.data.get("image_url") or "").strip()
                     detail_url = str(response.data.get("detail_url") or "").strip()
+                    web_url = str(response.data.get("web_url") or "").strip()
                 retry_lines = [
                     failure_message,
                     f"请重新回复：/subcap {normalized_task_id} 新验证码",
                     "注意: 旧验证码会失效，请按本条消息中的最新验证码图回复",
                 ]
+                if web_url:
+                    retry_lines.append(f"网页回填：{web_url}")
                 if image_url:
                     retry_lines.append(f"验证码图：{image_url}")
                 else:
@@ -3724,6 +3969,39 @@ class SubtitleAgentBridge(_PluginBase):
                 message_context=message_context,
             )
         return response
+
+    def __refresh_captcha_task(self, *, task_id: str) -> schemas.Response:
+        normalized_task_id = str(task_id or "").strip().lower()
+        tasks = self.__load_captcha_tasks()
+        task = tasks.get(normalized_task_id)
+        if not isinstance(task, dict):
+            return schemas.Response(success=False, message="验证码任务不存在或已过期")
+
+        _, _, message, error_data = self.__solve_captcha_download(
+            challenge_id=str(task.get("challenge_id") or ""),
+            code="zzzz",
+        )
+        refreshed = self.__extract_captcha_payload(error_data)
+        if refreshed:
+            task["challenge_id"] = str(refreshed.get("challenge_id") or task.get("challenge_id") or "").strip()
+            task["image_path"] = str(refreshed.get("image_path") or task.get("image_path") or "").strip()
+            task["image_available"] = bool(refreshed.get("image_available"))
+            task["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            tasks[normalized_task_id] = task
+            self.__save_captcha_tasks(tasks)
+
+            data = self.__captcha_task_response_data(
+                error_data=error_data,
+                media_name=str(task.get("media_name") or "未知媒体"),
+                target_file=str(task.get("target_file") or ""),
+            )
+            if not isinstance(data, dict):
+                data = self.__captcha_task_view_data(task_id=normalized_task_id, task=tasks.get(normalized_task_id))
+            return schemas.Response(success=False, message="验证码已刷新，请填写最新验证码", data=data)
+
+        fallback_data = self.__captcha_task_view_data(task_id=normalized_task_id, task=task)
+        fallback_message = self.__normalize_failure_message(message, "验证码刷新失败，请稍后重试")
+        return schemas.Response(success=False, message=fallback_message, data=fallback_data)
 
     def __solve_captcha_download(
         self,
@@ -3933,3 +4211,12 @@ class SubtitleAgentBridge(_PluginBase):
         if not self._host:
             return str(path)
         return urljoin(f"{self._host}/", str(path).lstrip("/"))
+
+    def __compose_web_url(self, path: str) -> str:
+        value = str(path or "").strip()
+        if value.startswith("http://") or value.startswith("https://"):
+            return value
+        base = str(self._web_base_url or "").strip()
+        if not base:
+            return value
+        return urljoin(f"{base}/", value.lstrip("/"))

@@ -131,15 +131,21 @@ curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/notify_
 3. 用户通过 Telegram / 企业微信等回复：
 
 ```text
-subcap a1b2c3d4 RhmE
+/subcap a1b2c3d4 RhmE
 ```
 
 插件收到后会继续调用 Subtitle Agent 完成验证码提交与字幕下载。
 
 Telegram 侧可用命令：
 
-- `subcap 任务ID 验证码`
-- `substatus [任务ID]`
+- `/subcap 任务ID 验证码`
+- `/subcap 任务ID refresh`（刷新验证码）
+- `/substatus [任务ID]`
+
+网页回填（v0.5.44+）：
+
+- 打开通知里的 `网页回填` 链接，直接在网页输入验证码提交。
+- 若验证码失效，可点击网页内 `刷新验证码` 按钮，无需在 TG 手输命令。
 
 也可以直接走插件接口：
 
@@ -175,6 +181,7 @@ curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/backfil
 
 ## 版本说明（近期）
 
+- `v0.5.44`：新增验证码网页回填页（`/captcha_web`）与 `/subcap 任务ID refresh` 命令；通知中增加网页回填链接，降低 TG 手输时效失败。
 - `v0.5.33`：优化验证码人工辅助交互：`subcap` 参数错误时主动返回格式提示；通知新增验证码详情页链接；回复文案改为“图中字母”避免误填占位词。
 - `v0.5.32`：新增异步手动下载任务（`download_subtitle_async`/`job_status`）和状态通知接口（`notify_status`），避免长耗时触发接口超时，便于通过 MoviePilot/Telegram 跟踪进度。
 - `v0.5.31`：新增 SubHD 字母验证码任务链路：通知推送验证码图片、支持回复 `subcap 任务ID 验证码` 继续下载；同时将手动下载通知精简为 2 个推荐候选。
