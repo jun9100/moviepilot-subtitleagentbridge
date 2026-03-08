@@ -28,7 +28,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.38"
+    plugin_version = "0.5.39"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -904,7 +904,7 @@ class SubtitleAgentBridge(_PluginBase):
                 if re.match(r"^\s*/?subcap(?:tcha)?\b", text, re.IGNORECASE):
                     self.__post_message_to_context(
                         title="Subtitle Agent 验证码格式错误",
-                        text="请发送: subcap 任务ID 图中字母\n示例: subcap 91e65710 AbCd",
+                        text="请发送: /subcap 任务ID 图中字母\n示例: /subcap 91e65710 AbCd",
                         message_context=self.__extract_message_context(event_data),
                     )
                     return
@@ -3216,8 +3216,8 @@ class SubtitleAgentBridge(_PluginBase):
             title = "Subtitle Agent 需要验证码"
             task_id = str(task_data.get("task_id") or "").strip()
             text_lines.append(f"任务ID: {task_id}")
-            text_lines.append(f"回复: subcap {task_id} 图中字母")
-            text_lines.append(f"示例: subcap {task_id} AbCd")
+            text_lines.append(f"回复: /subcap {task_id} 图中字母")
+            text_lines.append(f"示例: /subcap {task_id} AbCd")
             image_url = str(task_data.get("image_url") or "").strip() or None
             if image_url:
                 text_lines.append(f"验证码图: {image_url}")
@@ -3339,7 +3339,7 @@ class SubtitleAgentBridge(_PluginBase):
             "challenge_id": task_data.get("challenge_id"),
             "image_url": task_data.get("image_url"),
             "detail_url": task_data.get("detail_url"),
-            "reply_format": f"subcap {task_data.get('task_id')} 图中字母",
+            "reply_format": f"/subcap {task_data.get('task_id')} 图中字母",
         }
 
     def __create_captcha_task(
