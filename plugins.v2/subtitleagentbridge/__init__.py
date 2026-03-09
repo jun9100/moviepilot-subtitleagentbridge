@@ -33,7 +33,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.46"
+    plugin_version = "0.5.48"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -242,9 +242,23 @@ class SubtitleAgentBridge(_PluginBase):
     def get_command() -> List[Dict[str, Any]]:
         return [
             {
+                "cmd": "/字幕",
+                "event": EventType.PluginAction,
+                "desc": "字幕助手命令: /字幕 帮助 | /字幕 状态 | /字幕 验证码 | /字幕 查漏",
+                "category": "字幕",
+                "data": {"action": "subtitle_agent_zhcmd"},
+            },
+            {
+                "cmd": "/subscan",
+                "event": EventType.PluginAction,
+                "desc": "查漏补字幕: /subscan [最大扫描数] [关键词]",
+                "category": "字幕",
+                "data": {"action": "subtitle_agent_subscan"},
+            },
+            {
                 "cmd": "/subcap",
                 "event": EventType.PluginAction,
-                "desc": "提交字幕验证码: /subcap 任务ID 验证码",
+                "desc": "提交字幕验证码(兼容): /subcap 任务ID 验证码",
                 "category": "字幕",
                 "data": {"action": "subtitle_agent_subcap"},
             },
@@ -911,6 +925,14 @@ class SubtitleAgentBridge(_PluginBase):
             if not text:
                 return
 
+            message_context = self.__extract_message_context(event_data)
+            if self.__is_subtitle_zh_command(text):
+                self.__handle_subtitle_zh_command(
+                    text=text,
+                    message_context=message_context,
+                )
+                return
+
             parsed = self.__parse_captcha_reply(text)
             if parsed is None:
                 if re.match(r"^\s*/?substatus(?:\s+[A-Za-z0-9]{4,32})?\s*$", text, re.IGNORECASE):
@@ -919,14 +941,14 @@ class SubtitleAgentBridge(_PluginBase):
                     self.__post_message_to_context(
                         title="Subtitle Agent 任务状态",
                         text=self.__render_manual_job_status(job_id=job_id),
-                        message_context=self.__extract_message_context(event_data),
+                        message_context=message_context,
                     )
                     return
                 if re.match(r"^\s*/?subcap(?:tcha)?\b", text, re.IGNORECASE):
                     self.__post_message_to_context(
                         title="Subtitle Agent 验证码格式错误",
-                        text="请发送: /subcap 任务ID 图中字母\n示例: /subcap 91e65710 AbCd\n刷新验证码: /subcap 91e65710 refresh",
-                        message_context=self.__extract_message_context(event_data),
+                        text=self.__subtitle_command_help_text(error_only=True),
+                        message_context=message_context,
                     )
                     return
                 if re.match(r"^\s*/?subhelp\s*$", text, re.IGNORECASE) or re.match(
@@ -934,13 +956,12 @@ class SubtitleAgentBridge(_PluginBase):
                 ):
                     self.__post_message_to_context(
                         title="Subtitle Agent 验证码帮助",
-                        text="可用命令：\n1) /subcap 任务ID 验证码\n2) /subcap 任务ID refresh\n3) /substatus [任务ID]",
-                        message_context=self.__extract_message_context(event_data),
+                        text=self.__subtitle_command_help_text(),
+                        message_context=message_context,
                     )
                 return
 
             task_id, code = parsed
-            message_context = self.__extract_message_context(event_data)
             if self.__is_duplicate_captcha_submit(
                 task_id=task_id,
                 code=code,
@@ -960,17 +981,48 @@ class SubtitleAgentBridge(_PluginBase):
 
         event_data = event.event_data or {}
         action = str(event_data.get("action") or "").strip().lower()
-        if action not in {"subtitle_agent_subcap", "subtitle_agent_substatus", "subtitle_agent_subhelp"}:
+        if action not in {
+            "subtitle_agent_subcap",
+            "subtitle_agent_substatus",
+            "subtitle_agent_subhelp",
+            "subtitle_agent_zhcmd",
+            "subtitle_agent_subscan",
+        }:
             return
 
         message_context = self.__extract_message_context(event_data)
         arg_str = str(event_data.get("arg_str") or "").strip()
         fallback_text = self.__extract_user_message_text(event_data)
 
+        if action == "subtitle_agent_zhcmd":
+            full_text = str(fallback_text or "").strip()
+            if not full_text:
+                full_text = f"/字幕 {arg_str}".strip()
+            if not self.__is_subtitle_zh_command(full_text):
+                full_text = f"/字幕 {arg_str}".strip()
+            self.__handle_subtitle_zh_command(
+                text=full_text,
+                message_context=message_context,
+            )
+            return
+
+        if action == "subtitle_agent_subscan":
+            scan_arg = self.__extract_command_args(
+                command="subscan",
+                arg_str=arg_str,
+                fallback_text=fallback_text,
+            )
+            full_text = f"/字幕 查漏 {scan_arg}".strip()
+            self.__handle_subtitle_zh_command(
+                text=full_text,
+                message_context=message_context,
+            )
+            return
+
         if action == "subtitle_agent_subhelp":
             self.__post_message_to_context(
                 title="Subtitle Agent 验证码帮助",
-                text="可用命令：\n1) /subcap 任务ID 验证码\n2) /subcap 任务ID refresh\n3) /substatus [任务ID]",
+                text=self.__subtitle_command_help_text(),
                 message_context=message_context,
             )
             return
@@ -995,11 +1047,11 @@ class SubtitleAgentBridge(_PluginBase):
             arg_str=arg_str,
             fallback_text=fallback_text,
         )
-        parsed = self.__parse_captcha_reply(cap_arg) or self.__parse_captcha_reply(f"/subcap {cap_arg}")
+        parsed = self.__parse_captcha_reply(cap_arg) or self.__parse_captcha_reply(f"/字幕 验证码 {cap_arg}")
         if parsed is None:
             self.__post_message_to_context(
                 title="Subtitle Agent 验证码格式错误",
-                text="请发送: /subcap 任务ID 图中字母\n示例: /subcap 91e65710 AbCd\n刷新验证码: /subcap 91e65710 refresh",
+                text=self.__subtitle_command_help_text(error_only=True),
                 message_context=message_context,
             )
             return
@@ -1448,35 +1500,23 @@ class SubtitleAgentBridge(_PluginBase):
                     return
                 notice_title = "Subtitle Agent 异步任务成功" if response.success else "Subtitle Agent 异步任务失败"
                 lines = [f"任务ID: {job_id}", f"媒体: {media_name}"]
-                notice_image = None
                 if isinstance(response.data, dict):
                     output_path = str(response.data.get("path") or "").strip()
                     if output_path:
                         lines.append(f"字幕: {output_path}")
                     captcha_task_id = str(response.data.get("captcha_task_id") or "").strip()
-                    detail_url = str(response.data.get("detail_url") or "").strip()
-                    image_url = str(response.data.get("image_url") or "").strip()
                     web_url = str(response.data.get("web_url") or "").strip()
                     if captcha_task_id:
                         lines.append("结果: 需要验证码")
                         lines.append(f"验证码任务: {captcha_task_id}")
                         if web_url:
                             lines.append(f"网页回填: {web_url}")
-                        if detail_url:
-                            lines.append(f"详情页: {detail_url}")
-                        if image_url:
-                            lines.append(f"验证码图: {image_url}")
-                            notice_image = image_url
-                    reply_format = str(response.data.get("reply_format") or "").strip()
-                    if reply_format:
-                        lines.append(f"回复: {reply_format}")
                 if len(lines) == 2:
                     lines.append(f"结果: {response.message}")
                 self.post_message(
                     mtype=NotificationType.Plugin,
                     title=notice_title,
                     text="\n".join(lines),
-                    image=notice_image,
                 )
         except Exception as err:
             message = f"异步任务异常: {str(err)}"
@@ -3477,18 +3517,6 @@ class SubtitleAgentBridge(_PluginBase):
             return
         if not self.__requires_manual_download_notice(failure_message):
             return
-        if not items:
-            return
-
-        dedup_key = f"{media_name}|{target_file}|{failure_message}"
-        if dedup_key in self._manual_notice_cache:
-            return
-        self._manual_notice_cache.add(dedup_key)
-
-        preferred = preferred_languages or self.__split_languages(self._languages)
-        picked_items = self.__pick_manual_notice_items(items, preferred_languages=preferred)
-        if not picked_items:
-            return
 
         captcha_payload = self.__extract_captcha_payload(error_data)
         task_data = self.__create_captcha_task(
@@ -3501,49 +3529,32 @@ class SubtitleAgentBridge(_PluginBase):
             season=season,
             episode=episode,
         )
+        if not task_data and not items:
+            return
+
+        dedup_key = f"{media_name}|{target_file}|{failure_message}"
+        if dedup_key in self._manual_notice_cache:
+            return
+        self._manual_notice_cache.add(dedup_key)
 
         text_lines = [f"媒体: {media_name}"]
         if target_file:
             text_lines.append(f"文件: {target_file}")
-        image_url = None
-        title = "Subtitle Agent 需手动下载字幕"
+        title = "Subtitle Agent 需手动处理字幕"
         if task_data:
             title = "Subtitle Agent 需要验证码"
             task_id = str(task_data.get("task_id") or "").strip()
             text_lines.append(f"任务ID: {task_id}")
             web_url = str(task_data.get("web_url") or "").strip()
             if web_url:
-                text_lines.append(f"网页回填(推荐): {web_url}")
-            text_lines.append(f"回复: /subcap {task_id} 图中字母")
-            text_lines.append(f"刷新: /subcap {task_id} refresh")
-            image_url = str(task_data.get("image_url") or "").strip() or None
-            if image_url:
-                text_lines.append(f"验证码图: {image_url}")
-            else:
-                text_lines.append("验证码图: 直链不可用，请打开详情页")
-            detail_url = str(task_data.get("detail_url") or "").strip()
-            if detail_url:
-                text_lines.append(f"详情页: {detail_url}")
-
-        text_lines.append("推荐下载：")
-        for index, item in enumerate(picked_items, 1):
-            link = self.__manual_item_link(item)
-            provider = str(item.get("provider") or "unknown")
-            language = str(item.get("language") or "und")
-            subtitle_name = str(
-                item.get("name")
-                or item.get("title")
-                or item.get("subtitle_id")
-                or "字幕候选"
-            )
-            text_lines.append(f"{index}. [{provider}/{language}] {subtitle_name}")
-            text_lines.append(link)
+                text_lines.append(f"网页回填: {web_url}")
+        else:
+            text_lines.append("结果: 自动下载失败，请在插件页面手动处理。")
 
         self.post_message(
             mtype=NotificationType.Plugin,
             title=title,
             text="\n".join(text_lines),
-            image=image_url,
         )
 
     def __pick_manual_notice_items(
@@ -3619,7 +3630,7 @@ class SubtitleAgentBridge(_PluginBase):
             or "captcha code is required" in lowered
             or "验证码校验失败" in text
         ):
-            return "验证码错误，请按最新验证码图重试"
+            return "验证码错误，请使用网页回填重试"
         if (
             "subhd captcha expired or invalid" in lowered
             or "temporary page expired" in lowered
@@ -3628,7 +3639,7 @@ class SubtitleAgentBridge(_PluginBase):
             or "页面已经失效" in text
             or "时间过长" in text
         ):
-            return "验证码错误或已过期，请按最新验证码图重试"
+            return "验证码错误或已过期，请使用网页回填重试"
         return text
 
     def __is_duplicate_captcha_submit(
@@ -4063,21 +4074,12 @@ class SubtitleAgentBridge(_PluginBase):
                 lines = [str(response.message or "验证码已刷新，请填写新验证码")]
                 if isinstance(response.data, dict):
                     web_url = str(response.data.get("web_url") or "").strip()
-                    image_url = str(response.data.get("image_url") or "").strip()
-                    detail_url = str(response.data.get("detail_url") or "").strip()
                     if web_url:
                         lines.append(f"网页回填：{web_url}")
-                    if image_url:
-                        lines.append(f"验证码图：{image_url}")
-                    else:
-                        lines.append("验证码图：当前直链不可用，请打开详情页查看验证码")
-                    if detail_url:
-                        lines.append(f"详情页：{detail_url}")
                 self.__post_message_to_context(
-                    title="Subtitle Agent 验证码已刷新",
+                    title="Subtitle Agent 验证码已更新",
                     text="\n".join(lines),
                     message_context=message_context,
-                    image=str((response.data or {}).get("image_url") or "").strip() or None if isinstance(response.data, dict) else None,
                 )
             return response
 
@@ -4111,31 +4113,20 @@ class SubtitleAgentBridge(_PluginBase):
                 ),
             )
             if message_context:
-                image_url = ""
-                detail_url = ""
                 web_url = ""
                 if isinstance(response.data, dict):
-                    image_url = str(response.data.get("image_url") or "").strip()
-                    detail_url = str(response.data.get("detail_url") or "").strip()
                     web_url = str(response.data.get("web_url") or "").strip()
                 retry_lines = [
                     failure_message,
-                    f"请重新回复：/subcap {normalized_task_id} 新验证码",
-                    "注意: 旧验证码会失效，请按本条消息中的最新验证码图回复",
                 ]
                 if web_url:
                     retry_lines.append(f"网页回填：{web_url}")
-                if image_url:
-                    retry_lines.append(f"验证码图：{image_url}")
                 else:
-                    retry_lines.append("验证码图：当前直链不可用，请打开详情页查看验证码")
-                if detail_url:
-                    retry_lines.append(f"详情页：{detail_url}")
+                    retry_lines.append("请在插件内重新触发验证码任务。")
                 self.__post_message_to_context(
                     title="Subtitle Agent 验证码失败",
                     text="\n".join(retry_lines),
                     message_context=message_context,
-                    image=image_url or None,
                 )
             return response
 
@@ -4336,6 +4327,202 @@ class SubtitleAgentBridge(_PluginBase):
         return ""
 
     @staticmethod
+    def __is_subtitle_zh_command(text: str) -> bool:
+        return bool(re.match(r"^\s*/?字幕(?:\s+.*)?$", str(text or "").strip()))
+
+    @staticmethod
+    def __subtitle_command_help_text(error_only: bool = False) -> str:
+        if error_only:
+            return "请发送: /subcap 任务ID 图中字母\n示例: /subcap 91e65710 AbCd"
+        return (
+            "可用命令：\n"
+            "1) /subcap 任务ID 图中字母\n"
+            "2) /substatus [任务ID]\n"
+            "3) /subscan [最大扫描数] [关键词]\n"
+            "4) /字幕 帮助|状态|验证码|查漏（部分渠道可能不支持中文命令）"
+        )
+
+    def __handle_subtitle_zh_command(
+        self,
+        *,
+        text: str,
+        message_context: Optional[Dict[str, Any]],
+    ) -> None:
+        matched = re.match(r"^\s*/?字幕(?:\s+(.*))?\s*$", str(text or "").strip(), re.IGNORECASE)
+        if not matched:
+            return
+
+        args = str(matched.group(1) or "").strip()
+        if not args or re.match(r"^(?:帮助|help|h)$", args, re.IGNORECASE):
+            self.__post_message_to_context(
+                title="Subtitle Agent 字幕命令帮助",
+                text=self.__subtitle_command_help_text(),
+                message_context=message_context,
+            )
+            return
+
+        status_match = re.match(r"^(?:状态|status)(?:\s+([A-Za-z0-9]{4,32}))?\s*$", args, re.IGNORECASE)
+        if status_match:
+            job_id = status_match.group(1) or ""
+            self.__post_message_to_context(
+                title="Subtitle Agent 任务状态",
+                text=self.__render_manual_job_status(job_id=job_id),
+                message_context=message_context,
+            )
+            return
+
+        cap_match = re.match(
+            r"^(?:验证码|captcha|cap|subcap)\s+([A-Za-z0-9]{4,32})\s+([A-Za-z0-9]{3,16})\s*$",
+            args,
+            re.IGNORECASE,
+        )
+        if cap_match:
+            task_id = cap_match.group(1).lower()
+            code = cap_match.group(2)
+            if self.__is_duplicate_captcha_submit(
+                task_id=task_id,
+                code=code,
+                message_context=message_context,
+            ):
+                return
+            self.__submit_captcha_task(
+                task_id=task_id,
+                code=code,
+                message_context=message_context,
+            )
+            return
+
+        backfill_match = re.match(r"^(?:查漏|补字幕|补全|backfill)(?:\s+(.*))?\s*$", args, re.IGNORECASE)
+        if backfill_match:
+            extra = str(backfill_match.group(1) or "").strip()
+            max_files = self._periodic_max_files
+            name_contains = ""
+            if extra:
+                max_match = re.match(r"^([0-9]{1,4})(?:\s+(.+))?$", extra)
+                if max_match:
+                    max_files = max(1, min(int(max_match.group(1)), 2000))
+                    name_contains = str(max_match.group(2) or "").strip()
+                else:
+                    name_contains = extra
+            self.__start_chat_backfill_job(
+                message_context=message_context,
+                max_files=max_files,
+                name_contains=name_contains,
+            )
+            return
+
+        self.__post_message_to_context(
+            title="Subtitle Agent 字幕命令帮助",
+            text=self.__subtitle_command_help_text(),
+            message_context=message_context,
+        )
+
+    def __start_chat_backfill_job(
+        self,
+        *,
+        message_context: Optional[Dict[str, Any]],
+        max_files: int,
+        name_contains: str,
+    ) -> None:
+        if not self._host:
+            self.__post_message_to_context(
+                title="Subtitle Agent 查漏失败",
+                text="未配置 Subtitle Agent 地址",
+                message_context=message_context,
+            )
+            return
+
+        include_paths = self.__merge_csv_values(self._include_paths)
+        if not include_paths:
+            self.__post_message_to_context(
+                title="Subtitle Agent 查漏失败",
+                text="未配置“仅扫描目录(刮削后)”路径",
+                message_context=message_context,
+            )
+            return
+
+        job_id = uuid4().hex[:8]
+        root_hint = ",".join(include_paths[:3])
+        if len(include_paths) > 3:
+            root_hint = f"{root_hint} 等{len(include_paths)}个目录"
+        lines = [
+            f"任务ID: {job_id}",
+            f"扫描目录: {root_hint}",
+            f"最大扫描: {max_files}",
+        ]
+        if name_contains:
+            lines.append(f"关键词: {name_contains}")
+        self.__post_message_to_context(
+            title="Subtitle Agent 查漏任务已提交",
+            text="\n".join(lines),
+            message_context=message_context,
+        )
+
+        worker = threading.Thread(
+            target=self.__run_chat_backfill_job,
+            kwargs={
+                "job_id": job_id,
+                "message_context": dict(message_context or {}),
+                "include_paths": include_paths,
+                "max_files": max_files,
+                "name_contains": name_contains,
+            },
+            daemon=True,
+            name=f"subtitleagentbridge-chat-backfill-{job_id}",
+        )
+        worker.start()
+
+    def __run_chat_backfill_job(
+        self,
+        *,
+        job_id: str,
+        message_context: Optional[Dict[str, Any]],
+        include_paths: List[str],
+        max_files: int,
+        name_contains: str,
+    ) -> None:
+        if not self._periodic_run_lock.acquire(blocking=False):
+            self.__post_message_to_context(
+                title="Subtitle Agent 查漏任务冲突",
+                text=f"任务ID: {job_id}\n已有补字幕任务在执行，请稍后重试。",
+                message_context=message_context,
+            )
+            return
+
+        try:
+            response = self.backfill_directory(
+                apikey=settings.API_TOKEN,
+                directory=include_paths[0],
+                recursive=self._periodic_recursive,
+                media_type="",
+                languages=self._languages,
+                name_contains=name_contains,
+                include_paths=",".join(include_paths),
+                exclude_paths="",
+                exclude_keywords="",
+                title_aliases="",
+                overwrite=self._overwrite,
+                max_files=max_files,
+                limit=self._limit,
+            )
+            ok = bool(getattr(response, "success", False))
+            message = str(getattr(response, "message", "") or "")
+            self.__post_message_to_context(
+                title="Subtitle Agent 查漏完成" if ok else "Subtitle Agent 查漏失败",
+                text=f"任务ID: {job_id}\n{message}",
+                message_context=message_context,
+            )
+        except Exception as err:
+            self.__post_message_to_context(
+                title="Subtitle Agent 查漏异常",
+                text=f"任务ID: {job_id}\n{str(err)}",
+                message_context=message_context,
+            )
+            logger.error(f"[SubtitleAgentBridge] 查漏任务异常 {job_id}: {str(err)}")
+        finally:
+            self._periodic_run_lock.release()
+
+    @staticmethod
     def __extract_command_args(command: str, arg_str: str, fallback_text: str) -> str:
         text = str(arg_str or "").strip()
         if text:
@@ -4347,7 +4534,11 @@ class SubtitleAgentBridge(_PluginBase):
 
     @staticmethod
     def __parse_captcha_reply(text: str) -> Optional[Tuple[str, str]]:
-        matched = re.match(r"^\s*/?subcap(?:tcha)?\s+([A-Za-z0-9]{4,32})\s+([A-Za-z0-9]{3,16})\s*$", text, re.I)
+        matched = re.match(
+            r"^\s*(?:/?subcap(?:tcha)?|/?字幕\s*验证码)\s+([A-Za-z0-9]{4,32})\s+([A-Za-z0-9]{3,16})\s*$",
+            text,
+            re.I,
+        )
         if not matched:
             return None
         return matched.group(1).lower(), matched.group(2)
