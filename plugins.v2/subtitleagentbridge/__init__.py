@@ -33,7 +33,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.54"
+    plugin_version = "0.5.55"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -1188,6 +1188,36 @@ class SubtitleAgentBridge(_PluginBase):
             return schemas.Response(success=False, message="API密钥错误")
         self.__remember_web_base_url(request)
 
+        # 手动/API 触发时，尽量先解析 target_file 到媒体库真实文件，
+        # 与入库/回填流程保持一致的“无需补字幕”跳过规则。
+        target_file = self.__resolve_target_file_for_write(
+            target_file=target_file,
+            title=title,
+            media_type=media_type,
+            year=year,
+            season=season,
+            episode=episode,
+        )
+        if target_file:
+            target_path = Path(target_file)
+            if target_path.exists() and target_path.is_file() and self.__is_video_file(str(target_path)):
+                normalized_type = self.__normalize_media_type(media_type)
+                parsed_context = self.__parse_media_context_from_file(
+                    target_path,
+                    forced_media_type=normalized_type,
+                )
+                skip_reason = self.__skip_reason_for_media(target_path, parsed_context)
+                if skip_reason:
+                    return schemas.Response(
+                        success=True,
+                        message=f"跳过下载: {skip_reason}",
+                        data={
+                            "skipped": True,
+                            "reason": skip_reason,
+                            "target_file": str(target_path),
+                        },
+                    )
+
         payload = {
             "title": title,
             "type": "series" if media_type in ["tv", "series", "show"] else "movie",
@@ -1250,14 +1280,6 @@ class SubtitleAgentBridge(_PluginBase):
             )
             return schemas.Response(success=False, message=failure_message, data=response_data)
 
-        target_file = self.__resolve_target_file_for_write(
-            target_file=target_file,
-            title=title,
-            media_type=media_type,
-            year=year,
-            season=season,
-            episode=episode,
-        )
         if not target_file:
             return schemas.Response(
                 success=True,
@@ -1457,6 +1479,8 @@ class SubtitleAgentBridge(_PluginBase):
         key = str(status or "").strip().lower()
         if key == "captcha_required":
             return "等待验证码"
+        if key == "skipped":
+            return "已跳过"
         if key == "queued":
             return "排队中"
         if key == "running":
@@ -1501,7 +1525,14 @@ class SubtitleAgentBridge(_PluginBase):
                 and isinstance(response.data, dict)
                 and str(response.data.get("captcha_task_id") or "").strip()
             )
-            if response.success:
+            skipped = bool(
+                response.success
+                and isinstance(response.data, dict)
+                and self.__to_bool(response.data.get("skipped"), default=False)
+            )
+            if skipped:
+                status = "skipped"
+            elif response.success:
                 status = "success"
             elif captcha_required:
                 status = "captcha_required"
@@ -1518,7 +1549,10 @@ class SubtitleAgentBridge(_PluginBase):
                 if captcha_required:
                     logger.info(f"[SubtitleAgentBridge] 异步任务 {job_id} 已进入验证码流程，跳过重复失败通知")
                     return
-                notice_title = "Subtitle Agent 异步任务成功" if response.success else "Subtitle Agent 异步任务失败"
+                if skipped:
+                    notice_title = "Subtitle Agent 异步任务已跳过"
+                else:
+                    notice_title = "Subtitle Agent 异步任务成功" if response.success else "Subtitle Agent 异步任务失败"
                 lines = [f"任务ID: {job_id}", f"媒体: {media_name}"]
                 if isinstance(response.data, dict):
                     output_path = str(response.data.get("path") or "").strip()
