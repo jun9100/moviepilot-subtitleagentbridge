@@ -33,7 +33,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.50"
+    plugin_version = "0.5.51"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -242,18 +242,11 @@ class SubtitleAgentBridge(_PluginBase):
     def get_command() -> List[Dict[str, Any]]:
         return [
             {
-                "cmd": "/字幕",
+                "cmd": "/sub",
                 "event": EventType.PluginAction,
-                "desc": "字幕助手命令: /字幕 帮助 | /字幕 状态 | /字幕 验证码 | /字幕 查漏",
+                "desc": "字幕助手主命令: /sub help|status|cap|scan",
                 "category": "字幕",
-                "data": {"action": "subtitle_agent_zhcmd"},
-            },
-            {
-                "cmd": "/subscan",
-                "event": EventType.PluginAction,
-                "desc": "查漏补字幕: /subscan [最大扫描数] [关键词]",
-                "category": "字幕",
-                "data": {"action": "subtitle_agent_subscan"},
+                "data": {"action": "subtitle_agent_sub"},
             },
             {
                 "cmd": "/subcap",
@@ -270,11 +263,11 @@ class SubtitleAgentBridge(_PluginBase):
                 "data": {"action": "subtitle_agent_substatus"},
             },
             {
-                "cmd": "/subhelp",
+                "cmd": "/字幕",
                 "event": EventType.PluginAction,
-                "desc": "查看字幕验证码命令帮助",
+                "desc": "字幕命令中文别名(兼容)",
                 "category": "字幕",
-                "data": {"action": "subtitle_agent_subhelp"},
+                "data": {"action": "subtitle_agent_zhcmd"},
             },
         ]
 
@@ -926,6 +919,12 @@ class SubtitleAgentBridge(_PluginBase):
                 return
 
             message_context = self.__extract_message_context(event_data)
+            if self.__is_sub_ascii_command(text):
+                self.__handle_sub_ascii_command(
+                    text=text,
+                    message_context=message_context,
+                )
+                return
             if self.__is_subtitle_zh_command(text):
                 self.__handle_subtitle_zh_command(
                     text=text,
@@ -935,6 +934,18 @@ class SubtitleAgentBridge(_PluginBase):
 
             parsed = self.__parse_captcha_reply(text)
             if parsed is None:
+                if re.match(r"^\s*/?substatus\s+(?:scan|subscan|查漏|补字幕|补全)\b", text, re.IGNORECASE):
+                    scan_arg = re.sub(
+                        r"^\s*/?substatus\s+(?:scan|subscan|查漏|补字幕|补全)\b",
+                        "",
+                        text,
+                        flags=re.IGNORECASE,
+                    ).strip()
+                    self.__handle_subtitle_zh_command(
+                        text=f"/字幕 查漏 {scan_arg}".strip(),
+                        message_context=message_context,
+                    )
+                    return
                 if re.match(r"^\s*/?subscan(?:\s+.*)?\s*$", text, re.IGNORECASE):
                     scan_arg = re.sub(r"^\s*/?subscan\b", "", text, flags=re.IGNORECASE).strip()
                     self.__handle_subtitle_zh_command(
@@ -989,17 +1000,28 @@ class SubtitleAgentBridge(_PluginBase):
         event_data = event.event_data or {}
         action = str(event_data.get("action") or "").strip().lower()
         if action not in {
+            "subtitle_agent_sub",
             "subtitle_agent_subcap",
             "subtitle_agent_substatus",
-            "subtitle_agent_subhelp",
             "subtitle_agent_zhcmd",
-            "subtitle_agent_subscan",
         }:
             return
 
         message_context = self.__extract_message_context(event_data)
         arg_str = str(event_data.get("arg_str") or "").strip()
         fallback_text = self.__extract_user_message_text(event_data)
+
+        if action == "subtitle_agent_sub":
+            full_text = str(fallback_text or "").strip()
+            if not full_text:
+                full_text = f"/sub {arg_str}".strip()
+            if not self.__is_sub_ascii_command(full_text):
+                full_text = f"/sub {arg_str}".strip()
+            self.__handle_sub_ascii_command(
+                text=full_text,
+                message_context=message_context,
+            )
+            return
 
         if action == "subtitle_agent_zhcmd":
             full_text = str(fallback_text or "").strip()
@@ -1009,27 +1031,6 @@ class SubtitleAgentBridge(_PluginBase):
                 full_text = f"/字幕 {arg_str}".strip()
             self.__handle_subtitle_zh_command(
                 text=full_text,
-                message_context=message_context,
-            )
-            return
-
-        if action == "subtitle_agent_subscan":
-            scan_arg = self.__extract_command_args(
-                command="subscan",
-                arg_str=arg_str,
-                fallback_text=fallback_text,
-            )
-            full_text = f"/字幕 查漏 {scan_arg}".strip()
-            self.__handle_subtitle_zh_command(
-                text=full_text,
-                message_context=message_context,
-            )
-            return
-
-        if action == "subtitle_agent_subhelp":
-            self.__post_message_to_context(
-                title="Subtitle Agent 验证码帮助",
-                text=self.__subtitle_command_help_text(),
                 message_context=message_context,
             )
             return
@@ -4346,16 +4347,98 @@ class SubtitleAgentBridge(_PluginBase):
         return bool(re.match(r"^\s*/?字幕(?:\s+.*)?$", str(text or "").strip()))
 
     @staticmethod
+    def __is_sub_ascii_command(text: str) -> bool:
+        return bool(re.match(r"^\s*/?sub(?:\s+.*)?$", str(text or "").strip(), re.IGNORECASE))
+
+    @staticmethod
     def __subtitle_command_help_text(error_only: bool = False) -> str:
         if error_only:
-            return "请发送: /subcap 任务ID 图中字母\n示例: /subcap 91e65710 AbCd"
+            return "请发送: /sub cap 任务ID 图中字母\n示例: /sub cap 91e65710 AbCd"
         return (
             "可用命令：\n"
-            "1) /subcap 任务ID 图中字母\n"
-            "2) /substatus [任务ID]\n"
-            "3) /subscan [最大扫描数] [关键词]\n"
-            "4) /substatus scan [最大扫描数] [关键词]（查漏兜底）\n"
-            "5) /字幕 帮助|状态|验证码|查漏（部分渠道可能不支持中文命令）"
+            "1) /sub help\n"
+            "2) /sub status [任务ID]\n"
+            "3) /sub cap 任务ID 图中字母\n"
+            "4) /sub scan [最大扫描数] [关键词]\n"
+            "兼容旧命令：/subcap /substatus /subscan /字幕"
+        )
+
+    def __handle_sub_ascii_command(
+        self,
+        *,
+        text: str,
+        message_context: Optional[Dict[str, Any]],
+    ) -> None:
+        matched = re.match(r"^\s*/?sub(?:\s+(.*))?\s*$", str(text or "").strip(), re.IGNORECASE)
+        if not matched:
+            return
+
+        args = str(matched.group(1) or "").strip()
+        if not args or re.match(r"^(?:help|h|帮助)$", args, re.IGNORECASE):
+            self.__post_message_to_context(
+                title="Subtitle Agent 字幕命令帮助",
+                text=self.__subtitle_command_help_text(),
+                message_context=message_context,
+            )
+            return
+
+        if re.match(r"^(?:status|状态)(?:\s+.*)?$", args, re.IGNORECASE):
+            payload = re.sub(r"^(?:status|状态)\b", "", args, flags=re.IGNORECASE).strip()
+            if re.match(r"^(?:scan|subscan|查漏|补字幕|补全)(?:\s+.*)?$", payload, re.IGNORECASE):
+                scan_payload = re.sub(
+                    r"^(?:scan|subscan|查漏|补字幕|补全)\b",
+                    "",
+                    payload,
+                    flags=re.IGNORECASE,
+                ).strip()
+                self.__handle_subtitle_zh_command(
+                    text=f"/字幕 查漏 {scan_payload}".strip(),
+                    message_context=message_context,
+                )
+                return
+            if payload:
+                self.__post_message_to_context(
+                    title="Subtitle Agent 任务状态",
+                    text=self.__render_manual_job_status(job_id=payload.split()[0]),
+                    message_context=message_context,
+                )
+                return
+            self.__post_message_to_context(
+                title="Subtitle Agent 任务状态",
+                text=self.__render_manual_job_status(job_id=""),
+                message_context=message_context,
+            )
+            return
+
+        if re.match(r"^(?:scan|subscan|查漏|补字幕|补全)(?:\s+.*)?$", args, re.IGNORECASE):
+            payload = re.sub(r"^(?:scan|subscan|查漏|补字幕|补全)\b", "", args, flags=re.IGNORECASE).strip()
+            self.__handle_subtitle_zh_command(
+                text=f"/字幕 查漏 {payload}".strip(),
+                message_context=message_context,
+            )
+            return
+
+        cap_match = re.match(r"^(?:cap|captcha|验证码|subcap)\s+([A-Za-z0-9]{4,32})\s+([A-Za-z0-9]{3,16})\s*$", args, re.IGNORECASE)
+        if cap_match:
+            task_id = cap_match.group(1).lower()
+            code = cap_match.group(2)
+            if self.__is_duplicate_captcha_submit(
+                task_id=task_id,
+                code=code,
+                message_context=message_context,
+            ):
+                return
+            self.__submit_captcha_task(
+                task_id=task_id,
+                code=code,
+                message_context=message_context,
+            )
+            return
+
+        self.__post_message_to_context(
+            title="Subtitle Agent 字幕命令帮助",
+            text=self.__subtitle_command_help_text(),
+            message_context=message_context,
         )
 
     def __handle_subtitle_zh_command(
