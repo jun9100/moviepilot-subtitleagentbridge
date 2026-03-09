@@ -2,6 +2,8 @@
 
 `SubtitleAgentBridge` 是用于对接 `moviepilot-subtitle-agent` 的 MoviePilot 插件。
 
+> 当前文档对应版本：`v0.5.53`
+
 ## 插件作用
 
 - 监听 MoviePilot 入库事件（`TransferComplete`）。
@@ -74,6 +76,12 @@
 必填参数：
 
 - `apikey`（MoviePilot 的 API_TOKEN）
+
+## 文档脱敏说明
+
+- 文档中的 `apikey`、主机地址、路径均为占位符示例（如 `<API_TOKEN>`、`<moviepilot-host>`）。
+- 请勿将真实 API_TOKEN、Cookie、代理账号等写入 README 或公开截图。
+- 生产环境建议通过 MoviePilot 配置项或环境变量注入敏感信息。
 
 ## 手动下载示例
 
@@ -181,6 +189,13 @@ curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/backfil
 
 ## 版本说明（近期）
 
+- `v0.5.53`：修复 Plex 外挂字幕语言识别：字幕文件命名改为带语言后缀（如 `.zh.srt`），避免显示“未知”。
+- `v0.5.52`：命令体系重构：统一主入口 `/sub`（`help/status/cap/scan`），并在状态回复中显示插件版本，便于确认强制更新是否生效。
+- `v0.5.51`：命令收敛：统一解析链路，避免 Telegram 手工输入命令被不同事件通道漏处理。
+- `v0.5.50`：新增查漏兜底命令：`/substatus scan [max] [keyword]`，规避部分环境下 `/subscan` 路由不生效问题。
+- `v0.5.49`：修复 `/subscan` 在 UserMessage 通道不触发的问题，确保 Telegram 手动输入也能触发查漏任务。
+- `v0.5.48`：新增 `/subscan` 稳定别名并回退验证码回填提示到 `/subcap`，提升 Telegram 兼容性。
+- `v0.5.47`：新增中文命令 `/字幕`（状态/验证码/查漏），并支持从聊天直接触发查漏补字幕任务。
 - `v0.5.46`：验证码通知优先展示网页回填链接；自动修正 `/tmp` 等临时 `target_file` 到媒体库真实文件路径；验证码场景不再重复发送“异步任务失败”通知。
 - `v0.5.45`：修复验证码网页回填链路：网页链接自动携带 `apikey`，网页提交与刷新表单也保留 `apikey`，避免“apikey 校验不通过”。
 - `v0.5.44`：新增验证码网页回填页（`/captcha_web`）与 `/subcap 任务ID refresh` 命令；通知中增加网页回填链接，降低 TG 手输时效失败。
