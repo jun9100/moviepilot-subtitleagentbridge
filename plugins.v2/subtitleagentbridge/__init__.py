@@ -33,7 +33,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.53"
+    plugin_version = "0.5.54"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -261,13 +261,6 @@ class SubtitleAgentBridge(_PluginBase):
                 "desc": "查询字幕任务状态: /substatus [任务ID]",
                 "category": "字幕",
                 "data": {"action": "subtitle_agent_substatus"},
-            },
-            {
-                "cmd": "/字幕",
-                "event": EventType.PluginAction,
-                "desc": "字幕命令中文别名(兼容)",
-                "category": "字幕",
-                "data": {"action": "subtitle_agent_zhcmd"},
             },
         ]
 

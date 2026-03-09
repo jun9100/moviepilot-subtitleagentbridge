@@ -2,7 +2,7 @@
 
 `SubtitleAgentBridge` 是用于对接 `moviepilot-subtitle-agent` 的 MoviePilot 插件。
 
-> 当前文档对应版本：`v0.5.53`
+> 当前文档对应版本：`v0.5.54`
 
 ## 插件作用
 
@@ -189,6 +189,7 @@ curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/backfil
 
 ## 版本说明（近期）
 
+- `v0.5.54`：修复 Telegram 命令栏消失问题：不再注册非法中文 BotCommand（保留手动输入 `/字幕` 兼容）。
 - `v0.5.53`：修复 Plex 外挂字幕语言识别：字幕文件命名改为带语言后缀（如 `.zh.srt`），避免显示“未知”。
 - `v0.5.52`：命令体系重构：统一主入口 `/sub`（`help/status/cap/scan`），并在状态回复中显示插件版本，便于确认强制更新是否生效。
 - `v0.5.51`：命令收敛：统一解析链路，避免 Telegram 手工输入命令被不同事件通道漏处理。
