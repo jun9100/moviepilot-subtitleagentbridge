@@ -33,7 +33,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.52"
+    plugin_version = "0.5.53"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -1253,6 +1253,7 @@ class SubtitleAgentBridge(_PluginBase):
                 year=year,
                 season=season,
                 episode=episode,
+                subtitle_language=(self.__split_languages(languages or self._languages)[:1] or ["zh"])[0],
             )
             return schemas.Response(success=False, message=failure_message, data=response_data)
 
@@ -1275,7 +1276,12 @@ class SubtitleAgentBridge(_PluginBase):
                 },
             )
 
-        subtitle_path = self.__build_subtitle_path(target_file, subtitle_format)
+        subtitle_language = selected.get("language") or (self.__split_languages(languages or self._languages)[:1] or ["zh"])[0]
+        subtitle_path = self.__build_subtitle_path(
+            target_file,
+            subtitle_format,
+            language=subtitle_language,
+        )
         sync_note = ""
         try:
             subtitle_file = Path(subtitle_path)
@@ -1812,7 +1818,14 @@ class SubtitleAgentBridge(_PluginBase):
                         )
                         continue
 
-                    subtitle_path = Path(self.__build_subtitle_path(str(video_file), subtitle_format))
+                    subtitle_language = selected.get("language") or (preferred_languages[:1] or ["zh"])[0]
+                    subtitle_path = Path(
+                        self.__build_subtitle_path(
+                            str(video_file),
+                            subtitle_format,
+                            language=subtitle_language,
+                        )
+                    )
                     if subtitle_path.exists() and not overwrite_flag:
                         skipped += 1
                         continue
@@ -2030,7 +2043,12 @@ class SubtitleAgentBridge(_PluginBase):
             )
             return False, failure_message
 
-        subtitle_path = self.__build_subtitle_path(media_file, subtitle_format)
+        subtitle_language = selected.get("language") or (self.__split_languages(self._languages)[:1] or ["zh"])[0]
+        subtitle_path = self.__build_subtitle_path(
+            media_file,
+            subtitle_format,
+            language=subtitle_language,
+        )
         subtitle_file = Path(subtitle_path)
 
         if subtitle_file.exists() and not self._overwrite:
@@ -3240,11 +3258,38 @@ class SubtitleAgentBridge(_PluginBase):
         }
 
     @staticmethod
-    def __build_subtitle_path(media_file: str, subtitle_format: str) -> str:
+    def __normalize_subtitle_language_tag(language: Any, fallback: str = "zh") -> str:
+        raw = str(language or "").strip().lower().replace("_", "-")
+        if not raw:
+            raw = str(fallback or "zh").strip().lower()
+
+        # Plex external subtitle naming prefers ISO-like short language tags.
+        if raw in {"zh", "chi", "zho", "chs", "cht", "zh-cn", "zh-sg", "zh-hans", "zh-tw", "zh-hk", "zh-mo", "zh-hant"}:
+            return "zh"
+        if raw in {"en", "eng", "en-us", "en-gb"}:
+            return "en"
+        if raw in {"ja", "jpn", "jp"}:
+            return "ja"
+        if raw in {"ko", "kor", "kr"}:
+            return "ko"
+
+        if raw.startswith("zh"):
+            return "zh"
+
+        token = re.split(r"[^a-z0-9]+", raw)[0]
+        if re.fullmatch(r"[a-z]{2,3}", token or ""):
+            return token
+        return str(fallback or "zh").strip().lower() or "zh"
+
+    @classmethod
+    def __build_subtitle_path(cls, media_file: str, subtitle_format: str, language: Any = "zh") -> str:
         fmt = (subtitle_format or "srt").strip().lower()
         if not fmt:
             fmt = "srt"
-        return str(Path(media_file).with_suffix(f".{fmt}"))
+        lang = cls.__normalize_subtitle_language_tag(language, fallback="zh")
+        if not lang:
+            return str(Path(media_file).with_suffix(f".{fmt}"))
+        return str(Path(media_file).with_suffix(f".{lang}.{fmt}"))
 
     def __resolve_target_file_for_write(
         self,
@@ -3539,6 +3584,8 @@ class SubtitleAgentBridge(_PluginBase):
         if not self.__requires_manual_download_notice(failure_message):
             return
 
+        preferred = preferred_languages or self.__split_languages(self._languages)
+        subtitle_language = (preferred[:1] or ["zh"])[0]
         captcha_payload = self.__extract_captcha_payload(error_data)
         task_data = self.__create_captcha_task(
             captcha_payload=captcha_payload,
@@ -3549,6 +3596,7 @@ class SubtitleAgentBridge(_PluginBase):
             year=year,
             season=season,
             episode=episode,
+            subtitle_language=subtitle_language,
         )
         if not task_data and not items:
             return
@@ -3713,6 +3761,7 @@ class SubtitleAgentBridge(_PluginBase):
         year: int = None,
         season: int = None,
         episode: int = None,
+        subtitle_language: str = "zh",
     ) -> Optional[dict]:
         captcha_payload = self.__extract_captcha_payload(error_data)
         if not captcha_payload:
@@ -3726,6 +3775,7 @@ class SubtitleAgentBridge(_PluginBase):
             year=year,
             season=season,
             episode=episode,
+            subtitle_language=subtitle_language,
         )
         if not task_data:
             return None
@@ -3749,6 +3799,7 @@ class SubtitleAgentBridge(_PluginBase):
         year: int = None,
         season: int = None,
         episode: int = None,
+        subtitle_language: str = "zh",
     ) -> Optional[dict]:
         if not isinstance(captcha_payload, dict):
             return None
@@ -3767,6 +3818,10 @@ class SubtitleAgentBridge(_PluginBase):
                 task["year"] = self.__to_int(year) or self.__to_int(task.get("year"))
                 task["season"] = self.__to_int(season) or self.__to_int(task.get("season"))
                 task["episode"] = self.__to_int(episode) or self.__to_int(task.get("episode"))
+                task["language"] = self.__normalize_subtitle_language_tag(
+                    subtitle_language or task.get("language") or "zh",
+                    fallback="zh",
+                )
                 detail_url = str(captcha_payload.get("detail_url") or "").strip()
                 if detail_url:
                     task["detail_url"] = detail_url
@@ -3801,6 +3856,7 @@ class SubtitleAgentBridge(_PluginBase):
             "year": self.__to_int(year),
             "season": self.__to_int(season),
             "episode": self.__to_int(episode),
+            "language": self.__normalize_subtitle_language_tag(subtitle_language, fallback="zh"),
             "provider": str(captcha_payload.get("provider") or "").strip(),
             "subtitle_id": str(captcha_payload.get("subtitle_id") or "").strip(),
             "image_path": image_path,
@@ -4131,6 +4187,7 @@ class SubtitleAgentBridge(_PluginBase):
                     year=self.__to_int(task.get("year")),
                     season=self.__to_int(task.get("season")),
                     episode=self.__to_int(task.get("episode")),
+                    subtitle_language=str(task.get("language") or "zh"),
                 ),
             )
             if message_context:
@@ -4179,7 +4236,11 @@ class SubtitleAgentBridge(_PluginBase):
                 )
             return response
 
-        subtitle_path = self.__build_subtitle_path(target_file, subtitle_format)
+        subtitle_path = self.__build_subtitle_path(
+            target_file,
+            subtitle_format,
+            language=str(task.get("language") or "zh"),
+        )
         subtitle_file = Path(subtitle_path)
         sync_note = ""
         try:
@@ -4248,6 +4309,7 @@ class SubtitleAgentBridge(_PluginBase):
                 year=self.__to_int(task.get("year")),
                 season=self.__to_int(task.get("season")),
                 episode=self.__to_int(task.get("episode")),
+                subtitle_language=str(task.get("language") or "zh"),
             )
             if not isinstance(data, dict):
                 data = self.__captcha_task_view_data(
