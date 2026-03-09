@@ -33,7 +33,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.48"
+    plugin_version = "0.5.49"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -935,6 +935,13 @@ class SubtitleAgentBridge(_PluginBase):
 
             parsed = self.__parse_captcha_reply(text)
             if parsed is None:
+                if re.match(r"^\s*/?subscan(?:\s+.*)?\s*$", text, re.IGNORECASE):
+                    scan_arg = re.sub(r"^\s*/?subscan\b", "", text, flags=re.IGNORECASE).strip()
+                    self.__handle_subtitle_zh_command(
+                        text=f"/字幕 查漏 {scan_arg}".strip(),
+                        message_context=message_context,
+                    )
+                    return
                 if re.match(r"^\s*/?substatus(?:\s+[A-Za-z0-9]{4,32})?\s*$", text, re.IGNORECASE):
                     job_id_match = re.match(r"^\s*/?substatus(?:\s+([A-Za-z0-9]{4,32}))?\s*$", text, re.IGNORECASE)
                     job_id = job_id_match.group(1) if job_id_match else ""
