@@ -33,7 +33,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.55"
+    plugin_version = "0.5.56"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -3355,11 +3355,19 @@ class SubtitleAgentBridge(_PluginBase):
         best_path: Optional[Path] = None
         best_score = 0
         scanned = 0
+        scan_limit = self._target_resolve_scan_limit
+        normalized_target = self.__normalize_path(raw_target)
+        if normalized_target.startswith("/tmp/") or normalized_target.startswith("/var/tmp/") or normalized_target.startswith("/dev/shm/"):
+            # Manual/API test flows often pass temporary paths.
+            # Raise scan budget to improve real library file resolution hit rate.
+            scan_limit = max(scan_limit, 12000)
+        if expected_title:
+            scan_limit = max(scan_limit, 6000)
 
         for root in roots:
             for candidate in self.__iter_video_files(root, recursive=True):
                 scanned += 1
-                if scanned > self._target_resolve_scan_limit:
+                if scanned > scan_limit:
                     break
                 parsed = self.__parse_media_context_from_file(candidate, forced_media_type=expected_type)
                 score = self.__score_target_candidate(
@@ -3373,7 +3381,7 @@ class SubtitleAgentBridge(_PluginBase):
                 if score > best_score:
                     best_score = score
                     best_path = candidate
-            if scanned > self._target_resolve_scan_limit:
+            if scanned > scan_limit:
                 break
 
         if best_path and best_score >= 55:
