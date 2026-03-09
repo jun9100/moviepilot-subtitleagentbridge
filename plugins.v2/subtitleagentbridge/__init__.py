@@ -33,7 +33,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.51"
+    plugin_version = "0.5.52"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -1423,9 +1423,14 @@ class SubtitleAgentBridge(_PluginBase):
         if normalized:
             job = jobs.get(normalized)
             if not isinstance(job, dict):
-                return "任务不存在或已过期"
+                return (
+                    f"插件版本: v{self.plugin_version}\n"
+                    "任务不存在或已过期\n"
+                    "提示: /sub status 查看最近任务，/sub scan 50 触发查漏"
+                )
             return "\n".join(
                 [
+                    f"插件版本: v{self.plugin_version}",
                     f"任务ID: {normalized}",
                     f"状态: {self.__human_job_status(job.get('status'))}",
                     f"媒体: {job.get('media_name') or job.get('title') or '未知媒体'}",
@@ -1435,11 +1440,11 @@ class SubtitleAgentBridge(_PluginBase):
             )
 
         if not jobs:
-            return "当前没有可查询任务"
+            return f"插件版本: v{self.plugin_version}\n当前没有可查询任务"
 
         items = list(jobs.values())
         items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
-        lines = ["最近任务："]
+        lines = [f"插件版本: v{self.plugin_version}", "最近任务："]
         for item in items[:5]:
             lines.append(
                 f"{item.get('job_id')} | {self.__human_job_status(item.get('status'))} | "
