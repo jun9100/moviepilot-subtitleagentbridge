@@ -33,7 +33,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.49"
+    plugin_version = "0.5.50"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -1040,6 +1040,14 @@ class SubtitleAgentBridge(_PluginBase):
                 arg_str=arg_str,
                 fallback_text=fallback_text,
             )
+            scan_trigger = re.match(r"^(?:scan|subscan|查漏|补字幕|补全)(?:\s+(.*))?\s*$", status_arg or "", re.IGNORECASE)
+            if scan_trigger:
+                extra = str(scan_trigger.group(1) or "").strip()
+                self.__handle_subtitle_zh_command(
+                    text=f"/字幕 查漏 {extra}".strip(),
+                    message_context=message_context,
+                )
+                return
             job_id_match = re.match(r"^([A-Za-z0-9]{4,32})", status_arg or "")
             job_id = job_id_match.group(1) if job_id_match else ""
             self.__post_message_to_context(
@@ -4346,7 +4354,8 @@ class SubtitleAgentBridge(_PluginBase):
             "1) /subcap 任务ID 图中字母\n"
             "2) /substatus [任务ID]\n"
             "3) /subscan [最大扫描数] [关键词]\n"
-            "4) /字幕 帮助|状态|验证码|查漏（部分渠道可能不支持中文命令）"
+            "4) /substatus scan [最大扫描数] [关键词]（查漏兜底）\n"
+            "5) /字幕 帮助|状态|验证码|查漏（部分渠道可能不支持中文命令）"
         )
 
     def __handle_subtitle_zh_command(
