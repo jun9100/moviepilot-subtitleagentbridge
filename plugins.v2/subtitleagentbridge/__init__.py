@@ -33,7 +33,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.59"
+    plugin_version = "0.5.60"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -3801,23 +3801,38 @@ class SubtitleAgentBridge(_PluginBase):
             return
         self._manual_notice_cache.add(dedup_key)
 
+        manual_candidates = self.__pick_manual_notice_items(
+            items,
+            preferred_languages=preferred,
+        )
         text_lines = [f"媒体: {media_name}"]
         if target_file:
             text_lines.append(f"文件: {target_file}")
-        title = "Subtitle Agent 需手动处理字幕"
+        notice_title = "Subtitle Agent 需手动处理字幕"
         if task_data:
-            title = "Subtitle Agent 需要验证码"
+            notice_title = "Subtitle Agent 需要验证码"
             task_id = str(task_data.get("task_id") or "").strip()
             text_lines.append(f"任务ID: {task_id}")
             web_url = str(task_data.get("web_url") or "").strip()
             if web_url:
                 text_lines.append(f"网页回填: {web_url}")
         else:
-            text_lines.append("结果: 自动下载失败，请在插件页面手动处理。")
+            text_lines.append(f"结果: {failure_message or '自动下载失败'}")
+            if manual_candidates:
+                text_lines.append("可手动处理链接：")
+                for index, item in enumerate(manual_candidates, start=1):
+                    provider = str(item.get("provider") or "-").strip() or "-"
+                    sub_name = str(item.get("name") or item.get("title") or "").strip() or "未命名字幕"
+                    link = self.__manual_item_link(item)
+                    text_lines.append(f"{index}. {sub_name} [{provider}]")
+                    if link:
+                        text_lines.append(f"   {link}")
+            else:
+                text_lines.append("未获得可用候选链接，请在插件页面手动处理。")
 
         self.post_message(
             mtype=NotificationType.Plugin,
-            title=title,
+            title=notice_title,
             text="\n".join(text_lines),
         )
 
