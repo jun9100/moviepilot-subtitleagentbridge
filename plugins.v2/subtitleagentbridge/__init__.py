@@ -33,7 +33,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.58"
+    plugin_version = "0.5.59"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -70,6 +70,7 @@ class SubtitleAgentBridge(_PluginBase):
     _periodic_stop_event: Optional[threading.Event] = None
     _periodic_run_lock = threading.Lock()
     _manual_job_lock = threading.Lock()
+    _chat_backfill_lock_wait_seconds: int = 180
     _media_probe_cache: Dict[str, Dict[str, Any]] = {}
     _nfo_chinese_cache: Dict[str, bool] = {}
     _season_embedded_hint_cache: Dict[str, bool] = {}
@@ -4802,6 +4803,22 @@ class SubtitleAgentBridge(_PluginBase):
             return
 
         job_id = uuid4().hex[:8]
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        job_payload = {
+            "job_id": job_id,
+            "status": "queued",
+            "job_type": "chat_backfill",
+            "media_name": f"查漏任务({name_contains or '全量'})",
+            "title": name_contains or "查漏任务",
+            "message": "任务排队中",
+            "max_files": max_files,
+            "name_contains": name_contains,
+            "include_paths": ",".join(include_paths),
+            "created_at": now_text,
+            "updated_at": now_text,
+        }
+        self.__save_manual_job(job_id=job_id, payload=job_payload)
+
         root_hint = ",".join(include_paths[:3])
         if len(include_paths) > 3:
             root_hint = f"{root_hint} 等{len(include_paths)}个目录"
@@ -4841,15 +4858,31 @@ class SubtitleAgentBridge(_PluginBase):
         max_files: int,
         name_contains: str,
     ) -> None:
-        if not self._periodic_run_lock.acquire(blocking=False):
+        self.__update_manual_job(
+            job_id=job_id,
+            status="queued",
+            message="等待补字幕锁释放中",
+        )
+
+        if not self._periodic_run_lock.acquire(timeout=max(1, int(self._chat_backfill_lock_wait_seconds))):
+            self.__update_manual_job(
+                job_id=job_id,
+                status="failed",
+                message="已有补字幕任务在执行，等待超时，请稍后重试。",
+            )
             self.__post_message_to_context(
                 title="Subtitle Agent 查漏任务冲突",
-                text=f"任务ID: {job_id}\n已有补字幕任务在执行，请稍后重试。",
+                text=f"任务ID: {job_id}\n已有补字幕任务在执行，等待超时，请稍后重试。",
                 message_context=message_context,
             )
             return
 
         try:
+            self.__update_manual_job(
+                job_id=job_id,
+                status="running",
+                message="查漏任务执行中",
+            )
             response = self.backfill_directory(
                 apikey=settings.API_TOKEN,
                 directory=include_paths[0],
@@ -4867,12 +4900,23 @@ class SubtitleAgentBridge(_PluginBase):
             )
             ok = bool(getattr(response, "success", False))
             message = str(getattr(response, "message", "") or "")
+            self.__update_manual_job(
+                job_id=job_id,
+                status="success" if ok else "failed",
+                message=message or ("查漏完成" if ok else "查漏失败"),
+                result_data=response.data if isinstance(getattr(response, "data", None), dict) else {},
+            )
             self.__post_message_to_context(
                 title="Subtitle Agent 查漏完成" if ok else "Subtitle Agent 查漏失败",
                 text=f"任务ID: {job_id}\n{message}",
                 message_context=message_context,
             )
         except Exception as err:
+            self.__update_manual_job(
+                job_id=job_id,
+                status="failed",
+                message=f"查漏任务异常: {str(err)}",
+            )
             self.__post_message_to_context(
                 title="Subtitle Agent 查漏异常",
                 text=f"任务ID: {job_id}\n{str(err)}",
