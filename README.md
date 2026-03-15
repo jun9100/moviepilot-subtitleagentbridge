@@ -2,7 +2,7 @@
 
 `SubtitleAgentBridge` 是用于对接 `moviepilot-subtitle-agent` 的 MoviePilot 插件。
 
-> 当前文档对应版本：`v0.5.60`
+> 当前文档对应版本：`v0.5.61`
 
 ## 插件作用
 
@@ -191,6 +191,7 @@ curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/backfil
 
 ## 版本说明（近期）
 
+- `v0.5.61`：优化 `/sub scan` 关键词过滤：按“文件名 + 目录路径 + 解析标题”联合匹配关键词，减少返回无关剧集信息。
 - `v0.5.60`：修复“需手动处理字幕”通知缺少 TG 可点链接：非验证码失败时，通知自动附上最多 2 个候选手动链接（优先 `page_link`，其次下载链接）。
 - `v0.5.59`：修复 `/sub scan` 任务可见性与冲突体验：查漏任务写入任务状态列表（`/sub status` 可见），锁冲突改为“等待后超时提示”，减少“提示冲突但无任务可查”的困惑。
 - `v0.5.58`：修复定时补字幕重复命中同一批文件：新增 `periodic_overwrite`（定时任务独立覆盖开关，默认关闭），并引入扫描游标轮转（`start_offset/next_offset`）避免总是只扫前 200 个候选。

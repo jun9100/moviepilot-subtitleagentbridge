@@ -33,7 +33,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.60"
+    plugin_version = "0.5.61"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -1822,9 +1822,6 @@ class SubtitleAgentBridge(_PluginBase):
                         excluded += 1
                         continue
 
-                    if name_filter and name_filter not in video_file.name.lower():
-                        continue
-
                     matched_total += 1
                     if matched_total <= start_offset_value:
                         continue
@@ -1846,6 +1843,13 @@ class SubtitleAgentBridge(_PluginBase):
                         continue
 
                     parsed = self.__parse_media_context_from_file(video_file, forced_media_type=desired_type)
+                    if name_filter and not self.__match_name_filter(
+                        media_file=video_file,
+                        parsed=parsed,
+                        keyword=name_filter,
+                    ):
+                        processed -= 1
+                        continue
                     skip_reason = self.__skip_reason_for_media(video_file, parsed)
                     if skip_reason:
                         skipped += 1
@@ -2103,6 +2107,29 @@ class SubtitleAgentBridge(_PluginBase):
                 "items": downloaded[:50],
                 "errors": errors[:50],
             },
+        )
+
+    def __match_name_filter(
+        self,
+        *,
+        media_file: Path,
+        parsed: Optional[Dict[str, Any]],
+        keyword: str,
+    ) -> bool:
+        key = str(keyword or "").strip().lower()
+        if not key:
+            return True
+
+        parsed_title = self.__clean_title_text((parsed or {}).get("title") or "").lower()
+        media_name = self.__clean_title_text(media_file.name).lower()
+        parent_name = self.__clean_title_text(media_file.parent.name).lower()
+        full_path = self.__normalize_path(str(media_file))
+
+        return bool(
+            (parsed_title and key in parsed_title)
+            or (media_name and key in media_name)
+            or (parent_name and key in parent_name)
+            or (full_path and key in full_path)
         )
 
     def __format_success_target(self, raw: Any) -> str:
