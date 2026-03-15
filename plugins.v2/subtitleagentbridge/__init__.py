@@ -33,7 +33,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.57"
+    plugin_version = "0.5.58"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -65,6 +65,7 @@ class SubtitleAgentBridge(_PluginBase):
     _periodic_daily_time: str = "03:30"
     _periodic_max_files: int = 200
     _periodic_recursive: bool = True
+    _periodic_overwrite: bool = False
     _periodic_thread: Optional[threading.Thread] = None
     _periodic_stop_event: Optional[threading.Event] = None
     _periodic_run_lock = threading.Lock()
@@ -258,6 +259,7 @@ class SubtitleAgentBridge(_PluginBase):
         periodic_max_files = self.__to_int(config.get("periodic_max_files"))
         self._periodic_max_files = max(1, min(periodic_max_files or 200, 2000))
         self._periodic_recursive = self.__to_bool(config.get("periodic_recursive"), default=True)
+        self._periodic_overwrite = self.__to_bool(config.get("periodic_overwrite"), default=False)
         self._manual_notice_cache = set()
         self._media_probe_cache = {}
         self._nfo_chinese_cache = {}
@@ -412,6 +414,24 @@ class SubtitleAgentBridge(_PluginBase):
                                             "model": "web_base_url",
                                             "label": "网页回填基地址(可选)",
                                             "placeholder": "http://192.168.12.4:5010",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "periodic_overwrite",
+                                            "label": "定时任务覆盖已有字幕",
                                         },
                                     }
                                 ],
@@ -809,6 +829,7 @@ class SubtitleAgentBridge(_PluginBase):
             "periodic_daily_time": "03:30",
             "periodic_max_files": 200,
             "periodic_recursive": True,
+            "periodic_overwrite": False,
         }
 
     def get_page(self) -> List[dict]:
@@ -924,6 +945,7 @@ class SubtitleAgentBridge(_PluginBase):
         include_paths = self.__merge_csv_values(self._include_paths)
         if not include_paths:
             return
+        start_offset = max(0, self.__to_int(self.get_data("periodic_scan_offset")) or 0)
 
         if not self._periodic_run_lock.acquire(blocking=False):
             logger.info("[SubtitleAgentBridge] 定期补字幕任务仍在执行中，跳过本轮")
@@ -941,10 +963,16 @@ class SubtitleAgentBridge(_PluginBase):
                 exclude_paths="",
                 exclude_keywords="",
                 title_aliases="",
-                overwrite=self._overwrite,
+                overwrite=self._periodic_overwrite,
                 max_files=self._periodic_max_files,
                 limit=self._limit,
+                start_offset=start_offset,
             )
+            if isinstance(getattr(response, "data", None), dict):
+                next_offset = max(0, self.__to_int(response.data.get("next_offset")) or 0)
+                self.save_data("periodic_scan_offset", next_offset)
+            elif start_offset:
+                self.save_data("periodic_scan_offset", 0)
             success = bool(getattr(response, "success", False))
             message = str(getattr(response, "message", ""))
             if success:
@@ -1720,6 +1748,7 @@ class SubtitleAgentBridge(_PluginBase):
         limit: int = 0,
         detail_limit: int = 0,
         dry_run: bool = False,
+        start_offset: int = 0,
     ) -> schemas.Response:
         """
         扫描目录里没有字幕的视频文件并批量下载字幕。
@@ -1746,6 +1775,7 @@ class SubtitleAgentBridge(_PluginBase):
         max_file_count = self.__to_int(max_files) or 200
         if max_file_count <= 0:
             max_file_count = 200
+        start_offset_value = max(0, self.__to_int(start_offset) or 0)
         detail_count = self.__to_int(detail_limit) or self._dry_run_detail_limit
         if detail_count <= 0:
             detail_count = self._dry_run_detail_limit
@@ -1770,7 +1800,8 @@ class SubtitleAgentBridge(_PluginBase):
         missing_files: List[Dict[str, Any]] = []
         skipped_files: List[Dict[str, Any]] = []
 
-        matched = 0
+        matched_total = 0
+        window_limit_reached = False
         seen_identities = set()
         try:
             for scan_root in scan_roots:
@@ -1793,8 +1824,11 @@ class SubtitleAgentBridge(_PluginBase):
                     if name_filter and name_filter not in video_file.name.lower():
                         continue
 
-                    matched += 1
-                    if matched > max_file_count:
+                    matched_total += 1
+                    if matched_total <= start_offset_value:
+                        continue
+                    if processed >= max_file_count:
+                        window_limit_reached = True
                         break
 
                     processed += 1
@@ -1943,12 +1977,44 @@ class SubtitleAgentBridge(_PluginBase):
                     else:
                         logger.info(f"[SubtitleAgentBridge] 批量补字幕成功: {subtitle_path}")
 
-                if matched > max_file_count:
+                if window_limit_reached:
                     break
         except Exception as err:
             return schemas.Response(success=False, message=f"扫描目录失败: {str(err)}")
 
+        next_offset = 0
+        if window_limit_reached:
+            next_offset = start_offset_value + processed
+
         if processed == 0:
+            if start_offset_value > 0 and matched_total > 0:
+                self.save_data("periodic_scan_offset", 0)
+                return schemas.Response(
+                    success=True,
+                    message=f"扫描游标到达末尾（候选 {matched_total}），已自动重置为从头开始",
+                    data={
+                        "directory": directory,
+                        "scan_roots": [str(path) for path in scan_roots],
+                        "recursive": recursive_flag,
+                        "overwrite": overwrite_flag,
+                        "dry_run": dry_run_flag,
+                        "start_offset": start_offset_value,
+                        "next_offset": 0,
+                        "matched_total": matched_total,
+                        "scanned": 0,
+                        "processed": 0,
+                        "total": 0,
+                        "success": 0,
+                        "skipped": 0,
+                        "excluded": excluded,
+                        "failed": 0,
+                        "missing": 0,
+                        "missing_files": [],
+                        "skipped_files": [],
+                        "items": [],
+                        "errors": [],
+                    },
+                )
             if name_filter:
                 return schemas.Response(success=False, message=f"目录中未找到匹配关键词的视频文件: {name_filter}")
             return schemas.Response(success=False, message="目录中未找到视频文件")
@@ -1963,6 +2029,9 @@ class SubtitleAgentBridge(_PluginBase):
             "failed": failed,
             "dry_run": dry_run_flag,
             "missing": len(missing_files),
+            "start_offset": start_offset_value,
+            "next_offset": next_offset,
+            "matched_total": matched_total,
             "skipped_files": skipped_files[:200],
             "success_details": [
                 self.__format_backfill_success_detail(item)
@@ -2012,6 +2081,9 @@ class SubtitleAgentBridge(_PluginBase):
                 "recursive": recursive_flag,
                 "overwrite": overwrite_flag,
                 "dry_run": dry_run_flag,
+                "start_offset": start_offset_value,
+                "next_offset": next_offset,
+                "matched_total": matched_total,
                 "name_contains": name_filter,
                 "include_paths": included_paths,
                 "exclude_paths": excluded_paths,
