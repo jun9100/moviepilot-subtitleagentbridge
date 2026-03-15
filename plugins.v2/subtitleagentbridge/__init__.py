@@ -5485,7 +5485,12 @@ class SubtitleAgentBridge(_PluginBase):
         return subtitles, ""
 
     def __extract_archive_with_commands(self, *, archive_file: Path, output_dir: Path) -> Tuple[bool, str]:
-        seven_zip = shutil.which("7z") or shutil.which("7zz")
+        seven_zip = (
+            shutil.which("7z")
+            or shutil.which("7zz")
+            or shutil.which("7za")
+            or shutil.which("7zr")
+        )
         if seven_zip:
             cmd = [seven_zip, "x", "-y", str(archive_file), f"-o{output_dir}"]
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=max(120, self._timeout))
