@@ -33,7 +33,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.56"
+    plugin_version = "0.5.57"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -54,6 +54,7 @@ class SubtitleAgentBridge(_PluginBase):
     _exclude_paths: str = ""
     _exclude_keywords: str = "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache"
     _manual_skip_keywords: str = ""
+    _embedded_subtitle_skip_mode: str = "chinese"
     _title_aliases: str = ""
     _auto_timing_sync: bool = True
     _auto_timing_max_offset_seconds: int = 120
@@ -97,6 +98,33 @@ class SubtitleAgentBridge(_PluginBase):
         "zh-hant",
     }
     _chinese_audio_title_markers = {"中文", "国语", "普通话", "mandarin", "chinese", "cantonese", "粤语"}
+    _chinese_subtitle_lang_aliases = {
+        "zh",
+        "zho",
+        "chi",
+        "chs",
+        "cht",
+        "cmn",
+        "yue",
+        "zh-cn",
+        "zh-tw",
+        "zh-hans",
+        "zh-hant",
+    }
+    _chinese_subtitle_title_markers = {
+        "中文",
+        "中文字幕",
+        "简中",
+        "繁中",
+        "简体",
+        "繁体",
+        "中字",
+        "chs",
+        "cht",
+        "chi",
+        "zho",
+        "chinese",
+    }
     _chinese_library_markers = {
         "/国产剧/",
         "/国产电影/",
@@ -213,6 +241,10 @@ class SubtitleAgentBridge(_PluginBase):
             config.get("exclude_keywords") or "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache"
         )
         self._manual_skip_keywords = str(config.get("manual_skip_keywords") or "")
+        raw_embedded_mode = config.get("embedded_subtitle_skip_mode")
+        if raw_embedded_mode is None and "skip_embedded_subtitle" in config:
+            raw_embedded_mode = "any" if self.__to_bool(config.get("skip_embedded_subtitle"), default=True) else "off"
+        self._embedded_subtitle_skip_mode = self.__normalize_embedded_subtitle_skip_mode(raw_embedded_mode)
         self._title_aliases = str(config.get("title_aliases") or "")
         self._auto_skip_cjk_documentary = self.__to_bool(config.get("auto_skip_cjk_documentary"), default=True)
         self._auto_timing_sync = self.__to_bool(config.get("auto_timing_sync"), default=True)
@@ -579,6 +611,29 @@ class SubtitleAgentBridge(_PluginBase):
                                 "props": {"cols": 12, "md": 8},
                                 "content": [
                                     {
+                                        "component": "VSelect",
+                                        "props": {
+                                            "model": "embedded_subtitle_skip_mode",
+                                            "label": "内封字幕跳过策略",
+                                            "items": [
+                                                {"title": "仅内封中文字幕才跳过（推荐）", "value": "chinese"},
+                                                {"title": "任意内封字幕都跳过（旧行为）", "value": "any"},
+                                                {"title": "不因内封字幕跳过", "value": "off"},
+                                            ],
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
                                         "component": "VTextField",
                                         "props": {
                                             "model": "manual_skip_keywords",
@@ -743,6 +798,7 @@ class SubtitleAgentBridge(_PluginBase):
             "exclude_paths": "",
             "exclude_keywords": "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache",
             "manual_skip_keywords": "",
+            "embedded_subtitle_skip_mode": "chinese",
             "title_aliases": "",
             "auto_skip_cjk_documentary": True,
             "auto_timing_sync": True,
@@ -2027,6 +2083,7 @@ class SubtitleAgentBridge(_PluginBase):
         parsed = self.__parse_media_context_from_file(path)
         has_subtitle, detail = self.__has_subtitle_detail(path)
         skip_reason = self.__skip_reason_for_media(path, parsed)
+        probe = self.__probe_media_streams(path)
         return schemas.Response(
             success=True,
             message="ok",
@@ -2035,6 +2092,8 @@ class SubtitleAgentBridge(_PluginBase):
                 "parsed": parsed,
                 "has_subtitle": has_subtitle,
                 "skip_reason": skip_reason,
+                "probe": probe,
+                "embedded_subtitle_skip_mode": self._embedded_subtitle_skip_mode,
                 "detail": detail,
             },
         )
@@ -2699,10 +2758,15 @@ class SubtitleAgentBridge(_PluginBase):
             return "未分类目录下中文剧集（规则推断）"
 
         probe = self.__probe_media_streams(media_file)
-        if probe.get("has_embedded_subtitle"):
-            return "媒体已内封字幕"
-        if self.__is_anime_library_path(normalized_path) and self.__has_embedded_subtitle_sibling_hint(media_file):
-            return "同季样本已识别内封字幕（规则推断）"
+        skip_mode = self.__normalize_embedded_subtitle_skip_mode(self._embedded_subtitle_skip_mode)
+        if skip_mode != "off":
+            if probe.get("has_chinese_embedded_subtitle"):
+                return "媒体已内封中文字幕"
+            if skip_mode == "any":
+                if probe.get("has_embedded_subtitle"):
+                    return "媒体已内封字幕"
+                if self.__is_anime_library_path(normalized_path) and self.__has_embedded_subtitle_sibling_hint(media_file):
+                    return "同季样本已识别内封字幕（规则推断）"
         if probe.get("has_chinese_audio"):
             return "媒体含中文音轨"
         return ""
@@ -2967,6 +3031,7 @@ class SubtitleAgentBridge(_PluginBase):
 
         result: Dict[str, Any] = {
             "has_embedded_subtitle": False,
+            "has_chinese_embedded_subtitle": False,
             "has_chinese_audio": False,
             "probe_backend": "",
         }
@@ -2994,10 +3059,17 @@ class SubtitleAgentBridge(_PluginBase):
             result["has_embedded_subtitle"] = bool(
                 result["has_embedded_subtitle"] or partial.get("has_embedded_subtitle")
             )
+            result["has_chinese_embedded_subtitle"] = bool(
+                result["has_chinese_embedded_subtitle"] or partial.get("has_chinese_embedded_subtitle")
+            )
             result["has_chinese_audio"] = bool(result["has_chinese_audio"] or partial.get("has_chinese_audio"))
-            if not result["probe_backend"] and (result["has_embedded_subtitle"] or result["has_chinese_audio"]):
+            if not result["probe_backend"] and (
+                result["has_embedded_subtitle"]
+                or result["has_chinese_embedded_subtitle"]
+                or result["has_chinese_audio"]
+            ):
                 result["probe_backend"] = backend_name
-            if result["has_embedded_subtitle"] or result["has_chinese_audio"]:
+            if result["has_chinese_embedded_subtitle"] or result["has_chinese_audio"]:
                 break
 
         if not result["probe_backend"] and probe_errors:
@@ -3037,7 +3109,7 @@ class SubtitleAgentBridge(_PluginBase):
         if not isinstance(streams, list):
             streams = []
 
-        result = {"has_embedded_subtitle": False, "has_chinese_audio": False}
+        result = {"has_embedded_subtitle": False, "has_chinese_embedded_subtitle": False, "has_chinese_audio": False}
         for stream in streams:
             if not isinstance(stream, dict):
                 continue
@@ -3047,9 +3119,11 @@ class SubtitleAgentBridge(_PluginBase):
             title = str(tags.get("title") or "")
             if codec_type == "subtitle":
                 result["has_embedded_subtitle"] = True
+                if self.__is_chinese_subtitle_stream(language=language, title=title):
+                    result["has_chinese_embedded_subtitle"] = True
             elif codec_type == "audio" and self.__is_chinese_audio_stream(language=language, title=title):
                 result["has_chinese_audio"] = True
-            if result["has_embedded_subtitle"] and result["has_chinese_audio"]:
+            if result["has_chinese_embedded_subtitle"] and result["has_chinese_audio"]:
                 break
         return result
 
@@ -3070,7 +3144,7 @@ class SubtitleAgentBridge(_PluginBase):
         if not isinstance(tracks, list):
             tracks = []
 
-        result = {"has_embedded_subtitle": False, "has_chinese_audio": False}
+        result = {"has_embedded_subtitle": False, "has_chinese_embedded_subtitle": False, "has_chinese_audio": False}
         for track in tracks:
             if not isinstance(track, dict):
                 continue
@@ -3082,10 +3156,12 @@ class SubtitleAgentBridge(_PluginBase):
 
             if track_type in {"text", "subtitle"}:
                 result["has_embedded_subtitle"] = True
+                if self.__is_chinese_subtitle_stream(language=language, title=title):
+                    result["has_chinese_embedded_subtitle"] = True
             elif track_type == "audio" and self.__is_chinese_audio_stream(language=language, title=title):
                 result["has_chinese_audio"] = True
 
-            if result["has_embedded_subtitle"] and result["has_chinese_audio"]:
+            if result["has_chinese_embedded_subtitle"] and result["has_chinese_audio"]:
                 break
         return result
 
@@ -3101,19 +3177,21 @@ class SubtitleAgentBridge(_PluginBase):
         if not output:
             return None
 
-        result = {"has_embedded_subtitle": False, "has_chinese_audio": False}
+        result = {"has_embedded_subtitle": False, "has_chinese_embedded_subtitle": False, "has_chinese_audio": False}
         for raw_line in output.splitlines():
             line = str(raw_line or "").strip().lower()
             if "stream #" not in line:
                 continue
             if "subtitle:" in line:
                 result["has_embedded_subtitle"] = True
+                if self.__is_chinese_subtitle_stream(language="", title=line):
+                    result["has_chinese_embedded_subtitle"] = True
             if "audio:" in line:
                 if re.search(r"\((zh|zho|chi|chs|cht|cmn|yue)\)", line):
                     result["has_chinese_audio"] = True
                 elif self.__is_chinese_audio_stream(language="", title=line):
                     result["has_chinese_audio"] = True
-            if result["has_embedded_subtitle"] and result["has_chinese_audio"]:
+            if result["has_chinese_embedded_subtitle"] and result["has_chinese_audio"]:
                 break
         return result
 
@@ -3152,7 +3230,16 @@ class SubtitleAgentBridge(_PluginBase):
         if not has_subtitle:
             return None
 
-        return {"has_embedded_subtitle": True, "has_chinese_audio": False}
+        return {"has_embedded_subtitle": True, "has_chinese_embedded_subtitle": False, "has_chinese_audio": False}
+
+    def __is_chinese_subtitle_stream(self, language: str, title: str) -> bool:
+        lang = str(language or "").strip().lower().replace("_", "-")
+        if lang in self._chinese_subtitle_lang_aliases or lang.startswith("zh"):
+            return True
+        title_text = str(title or "").strip().lower()
+        if any(marker in title_text for marker in self._chinese_subtitle_title_markers):
+            return True
+        return False
 
     def __is_chinese_audio_stream(self, language: str, title: str) -> bool:
         lang = str(language or "").strip().lower().replace("_", "-")
@@ -4796,6 +4883,17 @@ class SubtitleAgentBridge(_PluginBase):
         if mode in {"daily", "day", "cron"}:
             return "daily"
         return "interval"
+
+    @staticmethod
+    def __normalize_embedded_subtitle_skip_mode(value: Any) -> str:
+        mode = str(value or "").strip().lower()
+        if mode in {"", "auto", "smart", "chinese", "zh", "zh-only", "zh_only"}:
+            return "chinese"
+        if mode in {"any", "all", "true", "1", "yes", "on"}:
+            return "any"
+        if mode in {"off", "false", "0", "no", "none"}:
+            return "off"
+        return "chinese"
 
     @staticmethod
     def __normalize_daily_time(value: Any) -> str:
