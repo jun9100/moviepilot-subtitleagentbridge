@@ -1,8 +1,11 @@
 import json
 import re
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
+import zipfile
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from html import escape
@@ -33,7 +36,7 @@ class SubtitleAgentBridge(_PluginBase):
     plugin_name = "Subtitle Agent Bridge"
     plugin_desc = "调用外部 MoviePilot Subtitle Agent 自动检索并下载字幕。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.61"
+    plugin_version = "0.5.62"
     plugin_author = "jun9100"
     author_url = "https://github.com/jun9100/moviepilot-subtitleagentbridge"
     plugin_config_prefix = "subtitleagentbridge_"
@@ -84,8 +87,11 @@ class SubtitleAgentBridge(_PluginBase):
     _recent_captcha_submits: Dict[str, float] = {}
     _refresh_code_keywords = {"refresh", "reload", "new", "again"}
     _target_resolve_scan_limit: int = 3000
+    _manual_subtitle_inbox_dir: str = ""
+    _manual_subtitle_recent_minutes: int = 180
 
     _subtitle_suffixes = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
+    _subtitle_archive_suffixes = {".zip", ".rar", ".7z"}
     _chinese_audio_lang_aliases = {
         "zh",
         "zho",
@@ -243,6 +249,9 @@ class SubtitleAgentBridge(_PluginBase):
             config.get("exclude_keywords") or "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache"
         )
         self._manual_skip_keywords = str(config.get("manual_skip_keywords") or "")
+        self._manual_subtitle_inbox_dir = str(config.get("manual_subtitle_inbox_dir") or "")
+        recent_minutes = self.__to_int(config.get("manual_subtitle_recent_minutes"))
+        self._manual_subtitle_recent_minutes = max(5, min(recent_minutes or 180, 10080))
         raw_embedded_mode = config.get("embedded_subtitle_skip_mode")
         if raw_embedded_mode is None and "skip_embedded_subtitle" in config:
             raw_embedded_mode = "any" if self.__to_bool(config.get("skip_embedded_subtitle"), default=True) else "off"
@@ -279,7 +288,7 @@ class SubtitleAgentBridge(_PluginBase):
             {
                 "cmd": "/sub",
                 "event": EventType.PluginAction,
-                "desc": "字幕助手主命令: /sub help|status|cap|scan",
+                "desc": "字幕助手主命令: /sub help|status|cap|scan|import",
                 "category": "字幕",
                 "data": {"action": "subtitle_agent_sub"},
             },
@@ -415,6 +424,39 @@ class SubtitleAgentBridge(_PluginBase):
                                             "model": "web_base_url",
                                             "label": "网页回填基地址(可选)",
                                             "placeholder": "http://192.168.12.4:5010",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 8},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "manual_subtitle_inbox_dir",
+                                            "label": "手动字幕收件箱目录",
+                                            "placeholder": "/media/downloads/subtitles_inbox",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "manual_subtitle_recent_minutes",
+                                            "label": "收件箱最近时间窗口(分钟)",
+                                            "type": "number",
                                         },
                                     }
                                 ],
@@ -819,6 +861,8 @@ class SubtitleAgentBridge(_PluginBase):
             "exclude_paths": "",
             "exclude_keywords": "整理前,刷流,strm,stream,downloads,download,incoming,temp,cache",
             "manual_skip_keywords": "",
+            "manual_subtitle_inbox_dir": "",
+            "manual_subtitle_recent_minutes": 180,
             "embedded_subtitle_skip_mode": "chinese",
             "title_aliases": "",
             "auto_skip_cjk_documentary": True,
@@ -1534,16 +1578,18 @@ class SubtitleAgentBridge(_PluginBase):
                     "任务不存在或已过期\n"
                     "提示: /sub status 查看最近任务，/sub scan 50 触发查漏"
                 )
-            return "\n".join(
-                [
-                    f"插件版本: v{self.plugin_version}",
-                    f"任务ID: {normalized}",
-                    f"状态: {self.__human_job_status(job.get('status'))}",
-                    f"媒体: {job.get('media_name') or job.get('title') or '未知媒体'}",
-                    f"更新时间: {job.get('updated_at')}",
-                    f"结果: {job.get('message') or ''}",
-                ]
-            )
+            lines = [
+                f"插件版本: v{self.plugin_version}",
+                f"任务ID: {normalized}",
+                f"状态: {self.__human_job_status(job.get('status'))}",
+                f"媒体: {job.get('media_name') or job.get('title') or '未知媒体'}",
+                f"更新时间: {job.get('updated_at')}",
+                f"结果: {job.get('message') or ''}",
+            ]
+            status = str(job.get("status") or "").strip().lower()
+            if status == "manual_required":
+                lines.append("操作: /sub import 任务ID（支持 zip/rar/7z 整季包）")
+            return "\n".join(lines)
 
         if not jobs:
             return f"插件版本: v{self.plugin_version}\n当前没有可查询任务"
@@ -1564,12 +1610,18 @@ class SubtitleAgentBridge(_PluginBase):
         key = str(status or "").strip().lower()
         if key == "captcha_required":
             return "等待验证码"
+        if key == "manual_required":
+            return "待手动导入"
         if key == "skipped":
             return "已跳过"
         if key == "queued":
             return "排队中"
         if key == "running":
             return "执行中"
+        if key == "import_partial":
+            return "部分成功"
+        if key == "import_failed":
+            return "导入失败"
         if key == "success":
             return "成功"
         if key == "failed":
@@ -3801,8 +3853,6 @@ class SubtitleAgentBridge(_PluginBase):
         season: int = None,
         episode: int = None,
     ) -> None:
-        if not self._notify:
-            return
         if not self.__requires_manual_download_notice(failure_message):
             return
 
@@ -3832,9 +3882,23 @@ class SubtitleAgentBridge(_PluginBase):
             items,
             preferred_languages=preferred,
         )
+        manual_job_id = self.__create_manual_import_job(
+            media_name=media_name,
+            title=title,
+            media_type=media_type,
+            year=year,
+            season=season,
+            episode=episode,
+            target_file=target_file,
+            subtitle_language=subtitle_language,
+            failure_message=failure_message,
+            candidates=manual_candidates,
+        )
         text_lines = [f"媒体: {media_name}"]
         if target_file:
             text_lines.append(f"文件: {target_file}")
+        if manual_job_id:
+            text_lines.append(f"手动任务: {manual_job_id}")
         notice_title = "Subtitle Agent 需手动处理字幕"
         if task_data:
             notice_title = "Subtitle Agent 需要验证码"
@@ -3856,12 +3920,65 @@ class SubtitleAgentBridge(_PluginBase):
                         text_lines.append(f"   {link}")
             else:
                 text_lines.append("未获得可用候选链接，请在插件页面手动处理。")
+        if manual_job_id:
+            if self._manual_subtitle_inbox_dir:
+                text_lines.append("下载字幕后发送: /sub import 任务ID（支持zip/rar/7z整季包）")
+            else:
+                text_lines.append("请先在插件配置“手动字幕收件箱目录”，再发送: /sub import 任务ID")
 
-        self.post_message(
-            mtype=NotificationType.Plugin,
-            title=notice_title,
-            text="\n".join(text_lines),
-        )
+        if self._notify:
+            self.post_message(
+                mtype=NotificationType.Plugin,
+                title=notice_title,
+                text="\n".join(text_lines),
+            )
+
+    def __create_manual_import_job(
+        self,
+        *,
+        media_name: str,
+        title: str,
+        media_type: str,
+        year: Optional[int],
+        season: Optional[int],
+        episode: Optional[int],
+        target_file: str,
+        subtitle_language: str,
+        failure_message: str,
+        candidates: Optional[List[dict]] = None,
+    ) -> str:
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        job_id = uuid4().hex[:8]
+        normalized_candidates: List[Dict[str, Any]] = []
+        for item in candidates or []:
+            if not isinstance(item, dict):
+                continue
+            normalized_candidates.append(
+                {
+                    "provider": str(item.get("provider") or "").strip(),
+                    "name": str(item.get("name") or item.get("title") or "").strip(),
+                    "link": self.__manual_item_link(item),
+                }
+            )
+        payload = {
+            "job_id": job_id,
+            "job_type": "manual_import",
+            "status": "manual_required",
+            "media_name": str(media_name or "").strip() or "未知媒体",
+            "title": str(title or "").strip(),
+            "media_type": str(media_type or "").strip(),
+            "year": self.__to_int(year),
+            "season": self.__to_int(season),
+            "episode": self.__to_int(episode),
+            "target_file": str(target_file or "").strip(),
+            "subtitle_language": str(subtitle_language or "").strip() or "zh",
+            "message": f"等待手动导入字幕: {str(failure_message or '自动下载失败').strip()}",
+            "manual_candidates": normalized_candidates,
+            "created_at": now_text,
+            "updated_at": now_text,
+        }
+        self.__save_manual_job(job_id=job_id, payload=payload)
+        return job_id
 
     def __pick_manual_notice_items(
         self,
@@ -4664,6 +4781,7 @@ class SubtitleAgentBridge(_PluginBase):
             "2) /sub status [任务ID]\n"
             "3) /sub cap 任务ID 图中字母\n"
             "4) /sub scan [最大扫描数] [关键词]\n"
+            "5) /sub import [任务ID] [文件关键词]\n"
             "兼容旧命令：/subcap /substatus /subscan /字幕"
         )
 
@@ -4718,6 +4836,26 @@ class SubtitleAgentBridge(_PluginBase):
             payload = re.sub(r"^(?:scan|subscan|查漏|补字幕|补全)\b", "", args, flags=re.IGNORECASE).strip()
             self.__handle_subtitle_zh_command(
                 text=f"/字幕 查漏 {payload}".strip(),
+                message_context=message_context,
+            )
+            return
+
+        import_match = re.match(r"^(?:import|导入|mp)(?:\s+(.*))?$", args, re.IGNORECASE)
+        if import_match:
+            extra = str(import_match.group(1) or "").strip()
+            import_job_id = ""
+            file_hint = ""
+            if extra:
+                parts = extra.split(maxsplit=1)
+                first = str(parts[0] or "").strip()
+                if re.fullmatch(r"[A-Za-z0-9]{4,32}", first):
+                    import_job_id = first.lower()
+                    file_hint = str(parts[1] if len(parts) > 1 else "").strip()
+                else:
+                    file_hint = extra
+            self.__handle_manual_subtitle_import_command(
+                job_id=import_job_id,
+                file_hint=file_hint,
                 message_context=message_context,
             )
             return
@@ -4814,11 +4952,558 @@ class SubtitleAgentBridge(_PluginBase):
             )
             return
 
+        import_match = re.match(r"^(?:导入|import|mp)(?:\s+(.*))?\s*$", args, re.IGNORECASE)
+        if import_match:
+            extra = str(import_match.group(1) or "").strip()
+            import_job_id = ""
+            file_hint = ""
+            if extra:
+                parts = extra.split(maxsplit=1)
+                first = str(parts[0] or "").strip()
+                if re.fullmatch(r"[A-Za-z0-9]{4,32}", first):
+                    import_job_id = first.lower()
+                    file_hint = str(parts[1] if len(parts) > 1 else "").strip()
+                else:
+                    file_hint = extra
+            self.__handle_manual_subtitle_import_command(
+                job_id=import_job_id,
+                file_hint=file_hint,
+                message_context=message_context,
+            )
+            return
+
         self.__post_message_to_context(
             title="Subtitle Agent 字幕命令帮助",
             text=self.__subtitle_command_help_text(),
             message_context=message_context,
         )
+
+    def __handle_manual_subtitle_import_command(
+        self,
+        *,
+        job_id: str,
+        file_hint: str,
+        message_context: Optional[Dict[str, Any]],
+    ) -> None:
+        response = self.__import_manual_subtitle_from_inbox(job_id=job_id, file_hint=file_hint)
+        title = "Subtitle Agent 手动导入完成" if response.success else "Subtitle Agent 手动导入失败"
+        body_lines = [str(response.message or "").strip()]
+        if isinstance(response.data, dict):
+            source_file = str(response.data.get("source_file") or "").strip()
+            if source_file:
+                body_lines.append(f"来源: {source_file}")
+            imported = response.data.get("imported") if isinstance(response.data.get("imported"), list) else []
+            if imported:
+                body_lines.append("写入字幕:")
+                for item in imported[:8]:
+                    if not isinstance(item, dict):
+                        continue
+                    media_file = Path(str(item.get("video") or "")).name or "-"
+                    subtitle_file = Path(str(item.get("subtitle") or "")).name or "-"
+                    body_lines.append(f"- {media_file} -> {subtitle_file}")
+            unmatched = response.data.get("unmatched") if isinstance(response.data.get("unmatched"), list) else []
+            if unmatched:
+                body_lines.append(f"未匹配条目: {len(unmatched)}")
+            skipped = response.data.get("skipped") if isinstance(response.data.get("skipped"), list) else []
+            if skipped:
+                body_lines.append(f"跳过写入: {len(skipped)}")
+        self.__post_message_to_context(
+            title=title,
+            text="\n".join([line for line in body_lines if line]),
+            message_context=message_context,
+        )
+
+    def __import_manual_subtitle_from_inbox(self, *, job_id: str = "", file_hint: str = "") -> schemas.Response:
+        inbox_dir_text = str(self._manual_subtitle_inbox_dir or "").strip()
+        if not inbox_dir_text:
+            return schemas.Response(success=False, message="未配置手动字幕收件箱目录")
+
+        inbox_dir = Path(inbox_dir_text).expanduser()
+        if not inbox_dir.exists() or not inbox_dir.is_dir():
+            return schemas.Response(success=False, message=f"手动字幕收件箱目录不存在: {inbox_dir}")
+
+        job = self.__pick_manual_import_job(job_id=job_id)
+        if not isinstance(job, dict):
+            if job_id:
+                return schemas.Response(success=False, message=f"任务不存在或不支持导入: {job_id}")
+            return schemas.Response(success=False, message="没有可导入的手动任务，请先触发一次手动处理通知")
+
+        target_file = self.__resolve_target_file_for_write(
+            target_file=str(job.get("target_file") or ""),
+            title=str(job.get("title") or ""),
+            media_type=str(job.get("media_type") or ""),
+            year=self.__to_int(job.get("year")),
+            season=self.__to_int(job.get("season")),
+            episode=self.__to_int(job.get("episode")),
+        )
+        if not target_file:
+            return schemas.Response(success=False, message="任务缺少 target_file，无法导入")
+
+        target_path = Path(target_file)
+        if not target_path.exists() or not target_path.is_file() or not self.__is_video_file(str(target_path)):
+            return schemas.Response(success=False, message=f"目标视频文件不存在: {target_file}")
+
+        source_file, stale = self.__pick_inbox_subtitle_source(inbox_dir=inbox_dir, file_hint=file_hint)
+        if source_file is None:
+            return schemas.Response(success=False, message="收件箱未找到可导入的字幕文件（支持 srt/ass/ssa/sub/vtt/zip/rar/7z）")
+
+        subtitle_language = str(job.get("subtitle_language") or "").strip()
+        if not subtitle_language:
+            subtitle_language = (self.__split_languages(self._languages)[:1] or ["zh"])[0]
+        season_hint = self.__to_int(job.get("season"))
+        target_videos = self.__collect_manual_target_videos(target_path=target_path, season_hint=season_hint)
+        imported, skipped, unmatched, error_message = self.__import_subtitles_for_job(
+            source_file=source_file,
+            target_videos=target_videos,
+            target_fallback=target_path,
+            season_hint=season_hint,
+            subtitle_language=subtitle_language,
+        )
+        if error_message:
+            self.__update_manual_job(job_id=str(job.get("job_id") or ""), status="import_failed", message=error_message)
+            return schemas.Response(
+                success=False,
+                message=error_message,
+                data={
+                    "job_id": str(job.get("job_id") or ""),
+                    "source_file": str(source_file),
+                    "imported": imported,
+                    "skipped": skipped,
+                    "unmatched": unmatched,
+                },
+            )
+
+        success_count = len(imported)
+        skipped_count = len(skipped)
+        unmatched_count = len(unmatched)
+        summary = f"导入完成: 成功 {success_count}，跳过 {skipped_count}，未匹配 {unmatched_count}"
+        if stale:
+            summary = f"{summary}（提示: 使用了较早文件，建议检查收件箱时间窗口配置）"
+        if success_count <= 0:
+            self.__update_manual_job(
+                job_id=str(job.get("job_id") or ""),
+                status="import_failed",
+                message=summary,
+                result_data={
+                    "source_file": str(source_file),
+                    "imported": imported,
+                    "skipped": skipped,
+                    "unmatched": unmatched,
+                },
+            )
+            return schemas.Response(
+                success=False,
+                message=summary,
+                data={
+                    "job_id": str(job.get("job_id") or ""),
+                    "source_file": str(source_file),
+                    "imported": imported,
+                    "skipped": skipped,
+                    "unmatched": unmatched,
+                },
+            )
+
+        final_status = "success" if (unmatched_count == 0 and skipped_count == 0) else "import_partial"
+        self.__update_manual_job(
+            job_id=str(job.get("job_id") or ""),
+            status=final_status,
+            message=summary,
+            result_data={
+                "source_file": str(source_file),
+                "imported": imported,
+                "skipped": skipped,
+                "unmatched": unmatched,
+            },
+        )
+        return schemas.Response(
+            success=True,
+            message=summary,
+            data={
+                "job_id": str(job.get("job_id") or ""),
+                "source_file": str(source_file),
+                "imported": imported,
+                "skipped": skipped,
+                "unmatched": unmatched,
+            },
+        )
+
+    def __pick_manual_import_job(self, *, job_id: str = "") -> Optional[Dict[str, Any]]:
+        self.__cleanup_manual_jobs()
+        jobs = self.__load_manual_jobs()
+        normalized = str(job_id or "").strip().lower()
+        if normalized:
+            payload = jobs.get(normalized)
+            if not isinstance(payload, dict):
+                return None
+            target_file = str(payload.get("target_file") or "").strip()
+            if not target_file:
+                return None
+            return payload
+
+        entries = list(jobs.values())
+        entries.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        for payload in entries:
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("job_type") or "").strip().lower() == "chat_backfill":
+                continue
+            status = str(payload.get("status") or "").strip().lower()
+            if status not in {"manual_required", "failed", "captcha_required", "import_failed", "import_partial"}:
+                continue
+            target_file = str(payload.get("target_file") or "").strip()
+            if not target_file:
+                continue
+            return payload
+        return None
+
+    def __pick_inbox_subtitle_source(self, *, inbox_dir: Path, file_hint: str = "") -> Tuple[Optional[Path], bool]:
+        candidates = self.__iter_manual_inbox_candidates(inbox_dir=inbox_dir, file_hint=file_hint)
+        if not candidates:
+            return None, False
+        cutoff_seconds = max(5, int(self._manual_subtitle_recent_minutes)) * 60
+        now_ts = time.time()
+        recent = []
+        for path in candidates:
+            try:
+                age = now_ts - float(path.stat().st_mtime)
+            except Exception:
+                age = float("inf")
+            if age <= cutoff_seconds:
+                recent.append(path)
+        if recent:
+            return recent[0], False
+        return candidates[0], True
+
+    def __iter_manual_inbox_candidates(self, *, inbox_dir: Path, file_hint: str = "") -> List[Path]:
+        hint = str(file_hint or "").strip().lower()
+        files: List[Path] = []
+        for candidate in inbox_dir.rglob("*"):
+            if not candidate.is_file():
+                continue
+            if not self.__is_manual_subtitle_source(candidate):
+                continue
+            if hint and hint not in candidate.name.lower():
+                continue
+            files.append(candidate)
+
+        def _mtime(path: Path) -> float:
+            try:
+                return float(path.stat().st_mtime)
+            except Exception:
+                return 0.0
+
+        files.sort(
+            key=_mtime,
+            reverse=True,
+        )
+        if len(files) > 2000:
+            files = files[:2000]
+        return files
+
+    def __is_manual_subtitle_source(self, path: Path) -> bool:
+        suffix = path.suffix.lower()
+        return suffix in self._subtitle_suffixes or suffix in self._subtitle_archive_suffixes
+
+    def __collect_manual_target_videos(self, *, target_path: Path, season_hint: Optional[int]) -> List[Path]:
+        videos = [target_path]
+        if season_hint is None:
+            return videos
+        for sibling in target_path.parent.iterdir():
+            if not sibling.is_file() or not self.__is_video_file(str(sibling)):
+                continue
+            parsed = self.__parse_media_context_from_file(sibling, forced_media_type="series")
+            if self.__to_int(parsed.get("season")) != season_hint:
+                continue
+            if self.__to_int(parsed.get("episode")) is None:
+                continue
+            videos.append(sibling)
+        deduped: List[Path] = []
+        seen = set()
+        for path in videos:
+            key = self.__normalize_path(str(path))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(path)
+        return sorted(deduped, key=lambda item: item.name.lower())
+
+    def __import_subtitles_for_job(
+        self,
+        *,
+        source_file: Path,
+        target_videos: List[Path],
+        target_fallback: Path,
+        season_hint: Optional[int],
+        subtitle_language: str,
+    ) -> Tuple[List[dict], List[dict], List[str], str]:
+        subtitle_files: List[Path] = []
+        if source_file.suffix.lower() in self._subtitle_suffixes:
+            subtitle_files = [source_file]
+        else:
+            with tempfile.TemporaryDirectory(prefix="sab-inbox-") as tmp_dir:
+                extracted, error_message = self.__extract_archive_subtitles(
+                    archive_file=source_file,
+                    output_dir=Path(tmp_dir),
+                )
+                if error_message:
+                    return [], [], [], error_message
+                subtitle_files = extracted
+
+        if not subtitle_files:
+            return [], [], [], f"未在文件中找到可用字幕: {source_file.name}"
+        return self.__apply_subtitle_sources_to_targets(
+            subtitle_sources=subtitle_files,
+            target_videos=target_videos,
+            target_fallback=target_fallback,
+            season_hint=season_hint,
+            subtitle_language=subtitle_language,
+        )
+
+    def __apply_subtitle_sources_to_targets(
+        self,
+        *,
+        subtitle_sources: List[Path],
+        target_videos: List[Path],
+        target_fallback: Path,
+        season_hint: Optional[int],
+        subtitle_language: str,
+    ) -> Tuple[List[dict], List[dict], List[str], str]:
+        imported: List[dict] = []
+        skipped: List[dict] = []
+        unmatched: List[str] = []
+
+        episode_targets: Dict[int, Path] = {}
+        for video in target_videos:
+            parsed = self.__parse_media_context_from_file(video, forced_media_type="series")
+            episode = self.__to_int(parsed.get("episode"))
+            if episode is None:
+                continue
+            episode_targets[episode] = video
+
+        chosen: Dict[str, Dict[str, Any]] = {}
+        if episode_targets:
+            for subtitle in subtitle_sources:
+                matched = self.__match_subtitle_to_episode_target(
+                    subtitle_file=subtitle,
+                    episode_targets=episode_targets,
+                    season_hint=season_hint,
+                )
+                if matched is None:
+                    unmatched.append(subtitle.name)
+                    continue
+                episode_no, target_video, score = matched
+                key = self.__normalize_path(str(target_video))
+                current = chosen.get(key)
+                if current is None or score > int(current.get("score") or 0):
+                    chosen[key] = {
+                        "episode": episode_no,
+                        "video": target_video,
+                        "source": subtitle,
+                        "score": score,
+                    }
+                elif score == int(current.get("score") or 0):
+                    old_name = str(current.get("source").name if isinstance(current.get("source"), Path) else "")
+                    if len(subtitle.name) < len(old_name):
+                        chosen[key] = {
+                            "episode": episode_no,
+                            "video": target_video,
+                            "source": subtitle,
+                            "score": score,
+                        }
+            for subtitle in subtitle_sources:
+                if not any(self.__normalize_path(str(subtitle)) == self.__normalize_path(str(item.get("source"))) for item in chosen.values()):
+                    if subtitle.name not in unmatched:
+                        unmatched.append(subtitle.name)
+        else:
+            best_source = self.__pick_best_subtitle_source(
+                subtitle_sources=subtitle_sources,
+                target_video=target_fallback,
+            )
+            if best_source is None:
+                return [], [], [path.name for path in subtitle_sources], "未找到可匹配的字幕文件"
+            key = self.__normalize_path(str(target_fallback))
+            chosen[key] = {
+                "episode": None,
+                "video": target_fallback,
+                "source": best_source,
+                "score": 100,
+            }
+            for subtitle in subtitle_sources:
+                if self.__normalize_path(str(subtitle)) != self.__normalize_path(str(best_source)):
+                    unmatched.append(subtitle.name)
+
+        for item in chosen.values():
+            video = item.get("video")
+            source = item.get("source")
+            if not isinstance(video, Path) or not isinstance(source, Path):
+                continue
+            subtitle_format = source.suffix.lower().lstrip(".")
+            if not subtitle_format:
+                subtitle_format = "srt"
+            subtitle_path = Path(
+                self.__build_subtitle_path(
+                    str(video),
+                    subtitle_format,
+                    language=subtitle_language,
+                )
+            )
+            if subtitle_path.exists() and not self._overwrite:
+                skipped.append(
+                    {
+                        "video": str(video),
+                        "subtitle": str(subtitle_path),
+                        "reason": "已存在同名字幕且未开启覆盖",
+                    }
+                )
+                continue
+
+            try:
+                content = source.read_bytes()
+                subtitle_path.parent.mkdir(parents=True, exist_ok=True)
+                content, _ = self.__maybe_auto_sync_timing(
+                    content=content,
+                    subtitle_format=subtitle_format,
+                    media_file=video,
+                    subtitle_file=subtitle_path,
+                )
+                subtitle_path.write_bytes(content)
+            except Exception as err:
+                return imported, skipped, unmatched, f"写入字幕失败: {str(err)}"
+            imported.append(
+                {
+                    "video": str(video),
+                    "subtitle": str(subtitle_path),
+                    "source": source.name,
+                    "episode": item.get("episode"),
+                }
+            )
+        return imported, skipped, unmatched, ""
+
+    def __match_subtitle_to_episode_target(
+        self,
+        *,
+        subtitle_file: Path,
+        episode_targets: Dict[int, Path],
+        season_hint: Optional[int],
+    ) -> Optional[Tuple[int, Path, int]]:
+        file_name = subtitle_file.stem
+        season_episode_match = self._season_episode_pattern.search(file_name)
+        if season_episode_match:
+            season_no = int(season_episode_match.group(1))
+            episode_no = int(season_episode_match.group(2))
+            target = episode_targets.get(episode_no)
+            if target is not None:
+                if season_hint is None or season_hint == season_no:
+                    return episode_no, target, 120
+                return episode_no, target, 100
+
+        episode_no = self.__extract_episode_hint_from_name(file_name)
+        if episode_no is not None:
+            target = episode_targets.get(episode_no)
+            if target is not None:
+                return episode_no, target, 80
+
+        if len(episode_targets) == 1:
+            only_episode, target = list(episode_targets.items())[0]
+            return only_episode, target, 20
+        return None
+
+    @staticmethod
+    def __extract_episode_hint_from_name(value: str) -> Optional[int]:
+        text = str(value or "")
+        patterns = [
+            r"(?<!\d)e[p]?\s*0*([1-9]\d{0,2})(?!\d)",
+            r"第\s*0*([1-9]\d{0,2})\s*[集话]",
+        ]
+        for pattern in patterns:
+            matched = re.search(pattern, text, re.IGNORECASE)
+            if not matched:
+                continue
+            try:
+                return int(matched.group(1))
+            except Exception:
+                continue
+        return None
+
+    def __pick_best_subtitle_source(self, *, subtitle_sources: List[Path], target_video: Path) -> Optional[Path]:
+        if not subtitle_sources:
+            return None
+        if len(subtitle_sources) == 1:
+            return subtitle_sources[0]
+        target_key = self.__normalize_subtitle_name_for_match(target_video.stem)
+        target_episode_key = self.__season_episode_key(target_video.stem)
+        best_item: Optional[Path] = None
+        best_score = -1
+        for candidate in subtitle_sources:
+            score = 0
+            candidate_key = self.__normalize_subtitle_name_for_match(candidate.stem)
+            if target_key and candidate_key:
+                score += int(SequenceMatcher(None, target_key, candidate_key).ratio() * 70)
+            if target_episode_key and target_episode_key == self.__season_episode_key(candidate.stem):
+                score += 40
+            if self.__is_chinese_subtitle_name(candidate.stem):
+                score += 6
+            suffix = candidate.suffix.lower()
+            if suffix == ".ass":
+                score += 3
+            elif suffix in {".ssa", ".srt"}:
+                score += 2
+            if score > best_score:
+                best_item = candidate
+                best_score = score
+        return best_item
+
+    def __is_chinese_subtitle_name(self, value: str) -> bool:
+        text = str(value or "").strip().lower()
+        if not text:
+            return False
+        return any(marker in text for marker in self._chinese_subtitle_title_markers)
+
+    def __extract_archive_subtitles(self, *, archive_file: Path, output_dir: Path) -> Tuple[List[Path], str]:
+        suffix = archive_file.suffix.lower()
+        if suffix == ".zip":
+            try:
+                with zipfile.ZipFile(archive_file, "r") as zf:
+                    zf.extractall(path=output_dir)
+            except Exception as err:
+                return [], f"解压 zip 失败: {str(err)}"
+        elif suffix in {".rar", ".7z"}:
+            ok, message = self.__extract_archive_with_commands(archive_file=archive_file, output_dir=output_dir)
+            if not ok:
+                return [], message
+        else:
+            return [], f"不支持的压缩格式: {archive_file.suffix}"
+
+        subtitles: List[Path] = []
+        for candidate in output_dir.rglob("*"):
+            if not candidate.is_file():
+                continue
+            if candidate.suffix.lower() not in self._subtitle_suffixes:
+                continue
+            subtitles.append(candidate)
+        subtitles.sort(key=lambda item: item.name.lower())
+        return subtitles, ""
+
+    def __extract_archive_with_commands(self, *, archive_file: Path, output_dir: Path) -> Tuple[bool, str]:
+        seven_zip = shutil.which("7z") or shutil.which("7zz")
+        if seven_zip:
+            cmd = [seven_zip, "x", "-y", str(archive_file), f"-o{output_dir}"]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=max(120, self._timeout))
+            if proc.returncode == 0:
+                return True, ""
+            stderr = (proc.stderr or proc.stdout or "").strip()
+            return False, f"解压失败(7z): {stderr[:240]}"
+
+        if archive_file.suffix.lower() == ".rar":
+            unrar = shutil.which("unrar")
+            if unrar:
+                cmd = [unrar, "x", "-o+", str(archive_file), str(output_dir)]
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=max(120, self._timeout))
+                if proc.returncode == 0:
+                    return True, ""
+                stderr = (proc.stderr or proc.stdout or "").strip()
+                return False, f"解压失败(unrar): {stderr[:240]}"
+        return False, "当前环境缺少压缩包解压工具，请安装 7z（或 rar 场景安装 unrar）"
 
     def __start_chat_backfill_job(
         self,

@@ -2,7 +2,7 @@
 
 `SubtitleAgentBridge` 是用于对接 `moviepilot-subtitle-agent` 的 MoviePilot 插件。
 
-> 当前文档对应版本：`v0.5.61`
+> 当前文档对应版本：`v0.5.62`
 
 ## 插件作用
 
@@ -40,6 +40,8 @@
 - `periodic_recursive`: `true`
 - `periodic_overwrite`: `false`（推荐，避免定时任务反复覆盖同一批字幕）
 - `embedded_subtitle_skip_mode`: `chinese`（推荐，仅内封中文字幕才跳过；可选 `any/off`）
+- `manual_subtitle_inbox_dir`: 手动字幕收件箱目录（用于 `/sub import` 读取你从网页下载的字幕/压缩包）
+- `manual_subtitle_recent_minutes`: `180`（默认取最近 180 分钟内最新文件）
 
 ### 自动时间轴校正
 
@@ -151,6 +153,30 @@ Telegram 侧可用命令：
 - `/subcap 任务ID 验证码`
 - `/subcap 任务ID refresh`（刷新验证码）
 - `/substatus [任务ID]`
+- `/sub import [任务ID] [文件关键词]`（或 `/sub mp`，支持 `zip/rar/7z` 整季包）
+
+## 手动导入整季包（v0.5.62+）
+
+当自动下载失败后，通知会附带 `手动任务ID`。  
+你在网页下载好字幕文件后（单文件或整季压缩包），放到 `manual_subtitle_inbox_dir`，然后在 TG 发送：
+
+```text
+/sub import 任务ID
+```
+
+可选写法：
+
+```text
+/sub mp 任务ID
+/sub import 任务ID 帅哥
+```
+
+说明：
+
+- 支持 `srt/ass/ssa/sub/vtt`，以及 `zip/rar/7z` 压缩包。
+- 整季包会优先按 `SxxEyy` 自动匹配到对应剧集文件。
+- 若压缩包里有未匹配条目，会在导入结果里显示“未匹配数量”。
+- `rar/7z` 需要系统有 `7z`（或 `unrar`）命令行工具。
 
 网页回填（v0.5.44+）：
 
@@ -191,6 +217,7 @@ curl -G "http://<moviepilot-host>:5010/api/v1/plugin/SubtitleAgentBridge/backfil
 
 ## 版本说明（近期）
 
+- `v0.5.62`：新增手动导入整季字幕包能力：支持 `/sub import`（含 `/sub mp`）从收件箱导入 `zip/rar/7z`，并按 `SxxEyy` 自动匹配写入对应剧集。
 - `v0.5.61`：优化 `/sub scan` 关键词过滤：按“文件名 + 目录路径 + 解析标题”联合匹配关键词，减少返回无关剧集信息。
 - `v0.5.60`：修复“需手动处理字幕”通知缺少 TG 可点链接：非验证码失败时，通知自动附上最多 2 个候选手动链接（优先 `page_link`，其次下载链接）。
 - `v0.5.59`：修复 `/sub scan` 任务可见性与冲突体验：查漏任务写入任务状态列表（`/sub status` 可见），锁冲突改为“等待后超时提示”，减少“提示冲突但无任务可查”的困惑。
